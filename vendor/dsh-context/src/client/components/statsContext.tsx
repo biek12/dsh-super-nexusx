@@ -1,21 +1,19 @@
-/** The Context card: counts only — proportions live on the composition card, the event rows on the events
- * card, and the token figures on the Token card. The counts arrive precomputed (the split-generation wire
- * head, or `countsOfRecords` on the inline generation); the card never touches the collections. */
-
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from 'react'
+/** The Context card: counts only, arriving precomputed (the split-generation wire head, or `countsOfRecords` inline). */
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from 'react'
 import type { ContextEventRecord, ContextTimeline, RequestRecord, SessionCostUsage, SurfaceNode, TimelineCounts } from '../../shared/types'
-import { estimateSessionCost, billedTokensOf, formatCost, formatPriceRate, mergeCostUsage, priceFaceOf, toCurrency } from '../cost'
-import type { CostCurrency, ModelBook, PriceFace } from '../cost'
+import { estimateSessionCost, billedTokensOf, formatCost, formatPriceRate, mergeCostUsage, priceLookupsOf, toCurrency } from '../cost'
+import type { CostCurrency, ModelBook, PriceFace, PriceMiss } from '../cost'
 import { sessionsFaceOf, subagentCostFoldOf } from '../agentTree'
-import type { AgentHeads } from '../agentHeads'
 import { useSessionsSnapshot } from '../agentHeads'
+import type { AgentHeads } from '../agentHeads'
 import type { Translate } from '../i18n'
 import { useModelPrices } from '../modelPrices'
-import { asRecord, type ClientCtx } from '../services'
+import { type ClientCtx } from '../services'
 import { isDeepSeekProvider } from '../../shared/providers'
 import type { ViewKit } from '../viewkit'
 
 interface PriceRow { key: string; face: PriceFace }
+interface PriceMissRow { key: string; provider: string; model: string; miss: PriceMiss }
 
 const BANDS: readonly (readonly [keyof PriceFace['rate'], string])[] = [
   ['hit', 'stats.costHit'],
@@ -24,34 +22,26 @@ const BANDS: readonly (readonly [keyof PriceFace['rate'], string])[] = [
   ['out', 'stats.costOut'],
 ]
 
-function priceRowsOf(usage: SessionCostUsage | undefined, book: ModelBook | null): PriceRow[] {
-  if (usage === undefined || book === null) return []
+function pricesOf(usage: SessionCostUsage | undefined, book: ModelBook | null): { rows: PriceRow[]; misses: PriceMissRow[] } {
+  if (usage === undefined || book === null) return { rows: [], misses: [] }
   const rows: PriceRow[] = []
-  for (const provider of Object.keys(usage)) {
-    const models = asRecord(usage[provider])
-    /* v8 ignore next 1 -- the fold's inputs are mergeCostUsage's own output
-       (hostile branches dropped at the merge), so a non-record branch never
-       reaches here; the guard stays for the helper's own contract. */
-    if (models === null) continue
-    for (const model of Object.keys(models)) {
-      const face = priceFaceOf(book, provider, model)
-      if (face === null) continue
-      rows.push({ key: provider + '/' + model, face })
-    }
+  const misses: PriceMissRow[] = []
+  for (const lookup of priceLookupsOf(usage, book)) {
+    const key = lookup.provider + '/' + lookup.model
+    if (lookup.face !== null) rows.push({ key, face: lookup.face })
+    else misses.push({ key, provider: lookup.provider, model: lookup.model, miss: lookup.miss })
   }
-  return rows
+  return { rows, misses }
 }
 
-/** The inline generation's counter derivation; the host's split-generation counts
- * match it by construction (fold.ts buildTimelineHead). */
+/** Inline counter derivation; the host's split-generation counts match it by construction (fold.ts buildTimelineHead). */
 export function countsOfRecords(requests: readonly RequestRecord[], events: readonly ContextEventRecord[]): TimelineCounts {
   const turns = new Set<number>()
   for (const req of requests) turns.add(req.turn ?? 0)
   let injects = 0
   let compactions = 0
   let prunes = 0
-  // Loaded skills: the distinct names among the skill-tagged inject events — the host fold's exact tag set
-  // (`sub: 'skill'` on `/name` invocations and `skill`-tool loads; the catalog digest rides an untagged event).
+  // Loaded skills: distinct names among skill-tagged injects — the host fold's tag set (`sub: 'skill'`).
   const skills = new Set<string>()
   for (const ev of events) {
     if (ev.kind === 'inject') injects++
@@ -92,37 +82,16 @@ export function makeSubagentCost(
   }
 }
 
-type FlowNodeKey = 'inputs' | 'events' | 'session' | 'tools' | 'cost'
+export type StatsEventKind = 'inject' | 'compaction' | 'prune'
 
-const FLOW_NODES: readonly FlowNodeKey[] = ['inputs', 'events', 'session', 'tools', 'cost']
-
-interface FlowBox { x: number; y: number; w: number; h: number }
-
-interface FlowLink { d: string; color: string }
-
-/** A box-edge anchor: the point plus the outward normal (the curve's tangent direction). */
-interface Anchor { x: number; y: number; dx: number; dy: number }
-
-/** Must match the `@container lc-card (max-width: …)` rule in stats.css: the flow root fills the card's
- * content box, so the `clientWidth` read and the CSS query can never disagree about the fold mode. */
-const FLOW_FOLD_PX = 559
-
-/** The flow topology; non-conservative by design — every ribbon is the same width whatever the tally behind it. */
-const FLOW_LINKS: readonly { from: FlowNodeKey; to: FlowNodeKey; fromAt: number; toAt: number; color: string }[] = [
-  { from: 'inputs', to: 'session', fromAt: 0.5, toAt: 1 / 3, color: 'var(--color-green-500)' },
-  { from: 'events', to: 'session', fromAt: 0.5, toAt: 2 / 3, color: 'var(--color-purple-500)' },
-  { from: 'session', to: 'tools', fromAt: 1 / 3, toAt: 0.5, color: 'var(--color-teal-500)' },
-  { from: 'session', to: 'cost', fromAt: 2 / 3, toAt: 0.5, color: 'var(--color-pink-500)' },
-]
-
-const EVENT_PILLS: readonly { kind: 'inject' | 'compaction' | 'prune'; tally: 'injects' | 'compactions' | 'prunes'; cls: string }[] = [
+const EVENT_PILLS: readonly { kind: StatsEventKind; tally: 'injects' | 'compactions' | 'prunes'; cls: string }[] = [
   { kind: 'inject', tally: 'injects', cls: 'lc-kind-inject' },
   { kind: 'compaction', tally: 'compactions', cls: 'lc-kind-compaction' },
   { kind: 'prune', tally: 'prunes', cls: 'lc-kind-prune' },
 ]
 
-/** Folded over the LIVE surface with the host's own predicate (fold.ts `toolCalls`), so the pills sum to
- * the head's `toolCalls` figure by construction, minus any result the fold stamped no name on. */
+/** The LIVE surface folded with the host's own predicate (fold.ts `toolCalls`), so the pills sum to the head's
+ * `toolCalls` figure by construction, minus any result the fold stamped no name on. */
 export function toolTallyOf(nodes: readonly SurfaceNode[]): [string, number][] {
   const tally = new Map<string, number>()
   for (const n of nodes) {
@@ -133,15 +102,12 @@ export function toolTallyOf(nodes: readonly SurfaceNode[]): [string, number][] {
   return [...tally].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
 }
 
-/** Every jump the board offers, resolved by the caller (contextView.tsx owns both bridges): the session figures and
- *  the user-input pill open a Context Browser category, the file pills land on the File Activity card's own chips. */
 export type StatsJump = 'skills' | 'answers' | 'inputs' | 'read' | 'write' | 'search' | 'image'
 
-/** Each jump's action tip — the fired cell's `title`, phrased as what the click does. */
 const JUMP_TIPS: Record<StatsJump, string> = {
   skills: 'stats.skillsJump',
   answers: 'stats.answersJump',
-  inputs: 'stats.humanInputsJump',
+  inputs: 'stats.userJump',
   read: 'stats.filesJump',
   write: 'stats.filesJump',
   search: 'stats.filesJump',
@@ -156,97 +122,97 @@ interface JumpWire {
   onKeyDown: (ev: KeyboardEvent) => void
 }
 
+/** One keyboard-and-click wire for every jumpable chip: Enter/Space fires, any other key passes through. */
+function pickWire(title: string | undefined, fire: () => void): JumpWire {
+  return {
+    role: 'button',
+    tabIndex: 0,
+    title,
+    onClick: fire,
+    onKeyDown: (ev: KeyboardEvent) => {
+      if (ev.key !== 'Enter' && ev.key !== ' ') return
+      ev.preventDefault()
+      fire()
+    },
+  }
+}
+
 interface StatsContextProps {
   counts: TimelineCounts
   humanInputs?: number
   answers?: number
   onJump?: (jump: StatsJump) => void
-  /** The family card's own view, wherever the caller serves it (contextView.tsx owns the jump). */
   onTeamClick?: () => void
+  /** The tool lane's chip pick: open the tool's results in the Context Browser. */
+  onToolPick?: (tool: string) => void
+  /** The command lane's chip pick: filter that program in the Command Executions card. */
+  onCommandPick?: (program: string) => void
+  /** The events tile's per-kind jump: reveal the Context Events card filtered to that kind. */
+  onEventsClick?: (kind: StatsEventKind) => void
   toolCalls?: number
   files: { reads: number; writes: number; searches: number; images: number }
   tools: readonly (readonly [string, number])[]
+  /** The execution log's headline runs and its top programs; absent (or empty) on hosts before the collection. */
+  commands?: { runs: number; top: readonly (readonly [string, number])[] }
   cost?: SessionCostUsage
   locale: string
   sessionId?: string
 }
 
-function flowAnchor(box: FlowBox, side: 'left' | 'right' | 'top' | 'bottom', at: number): Anchor {
-  switch (side) {
-    case 'left': return { x: box.x, y: box.y + box.h * at, dx: -1, dy: 0 }
-    case 'right': return { x: box.x + box.w, y: box.y + box.h * at, dx: 1, dy: 0 }
-    case 'top': return { x: box.x + box.w * at, y: box.y, dx: 0, dy: -1 }
-    case 'bottom': return { x: box.x + box.w * at, y: box.y + box.h, dx: 0, dy: 1 }
-  }
+/** The I/O lane's identity colors: file kinds carry the File Activity card's own chip colors (a jump keeps its
+ *  color across cards), human inputs the user category's green, image reads the output pink. */
+const IO_COLOR: Record<'inputs' | 'read' | 'write' | 'search' | 'image', string> = {
+  inputs: 'var(--color-green-500)',
+  read: 'var(--dsw-alias-brand-primary)',
+  write: 'var(--dsw-alias-state-success-primary)',
+  search: 'var(--dsw-alias-state-warn-primary)',
+  image: 'var(--color-pink-500)',
 }
 
-/** Cubic whose end control point sits at `b + normal·k`, so the path arrives moving INTO the node. */
-export function flowCurve(a: Anchor, b: Anchor): string {
-  const k = Math.max(18, (a.dx !== 0 ? Math.abs(b.x - a.x) : Math.abs(b.y - a.y)) / 2)
-  return `M ${a.x} ${a.y} C ${a.x + a.dx * k} ${a.y + a.dy * k} ${b.x + b.dx * k} ${b.y + b.dy * k} ${b.x} ${b.y}`
-}
+/** Tool chips shade by rank in the tool category's teal; the unnamed rest reads neutral. */
+const TOOL_SHADE = (rank: number): string =>
+  `color-mix(in srgb, var(--color-teal-500) ${Math.max(38, 100 - rank * 21)}%, transparent)`
+const TOOL_REST = 'color-mix(in srgb, var(--color-neutral-500) 40%, transparent)'
 
-/** Sources attach on their trailing edge and targets on their leading one: the session node is a target of
- * the left/top pair and the source of the right/bottom pair, so one orientation pair serves both modes. */
-export function measureFlow(boxes: Record<FlowNodeKey, FlowBox>, horizontal: boolean): FlowLink[] {
-  const fromSide = horizontal ? 'right' as const : 'bottom' as const
-  const toSide = horizontal ? 'left' as const : 'top' as const
-  return FLOW_LINKS.map(link => ({
-    d: flowCurve(flowAnchor(boxes[link.from], fromSide, link.fromAt), flowAnchor(boxes[link.to], toSide, link.toAt)),
-    color: link.color,
-  }))
-}
+/** The tool lane's own gap, mirrored from `.lc-ledger-chips` in stats.css so the fit arithmetic matches the rendered box. */
+const CHIP_GAP = 3
 
-/** The row's own gap, mirrored from `.lc-flow-pills` in stats.css so the fit arithmetic matches the rendered box. */
-const PILL_GAP = 4
-
-/** The tool tally on ONE line, exactly like the Input/Output row above it: every tool the card has room for, spelled
- *  out in full, and the rest folded into a trailing "其他 +N" — so a session that used five tools shows five rather than
- *  an arbitrary top three.
- *
- *  The visible row renders ONLY what fits, so nothing is ever clipped or overlapped. The fit is measured off a hidden
- *  gauge that carries every pill at its natural width — a pill's width does not depend on whether its neighbours are on
- *  screen, so the gauge answers for the tail the row is not showing. Because the row never wraps, the node's height is
- *  a property of the card's width alone: it stops resizing as a session's tool mix changes. With no tally (the split
- *  generation's head carries none) the row holds a lone "其他 +0". */
-function ToolPills(props: {
-  tools: readonly (readonly [string, number])[]
-  t: Translate
-  fmt: (n: number) => string
-}): ReactElement {
-  const { tools, t, fmt } = props
+/** Widest leading run of chips that fits the row. `alwaysMore` reserves the tail chip even when nothing is hidden
+ *  (the tool lane's colour key); otherwise every chip shows when it fits and only the overflow folds. */
+function useFittedChips(tally: readonly unknown[], alwaysMore: boolean) {
+  const count = tally.length
   const rowRef = useRef<HTMLDivElement | null>(null)
   const gaugeRef = useRef<HTMLDivElement | null>(null)
   const chipGaugeRef = useRef<HTMLDivElement | null>(null)
-  const [shown, setShown] = useState(tools.length)
-
-  const pill = (name: string, n: number, title?: string): ReactElement => (
-    <span key={name} className="lc-flow-pill" title={title}>
-      <span className="lc-flow-pill-label">{name}</span>
-      <b>{fmt(n)}</b>
-    </span>
-  )
+  const [shown, setShown] = useState(count)
 
   const fit = useCallback(() => {
+    const count = tally.length
     const row = rowRef.current
     const gauge = gaugeRef.current
     const chipGauge = chipGaugeRef.current
     /* v8 ignore next 3 -- the gauges always render, so their refs are set whenever the row is. */
     if (row === null || gauge === null || chipGauge === null) return
     const width = row.getBoundingClientRect().width
-    // Nothing measurable (a hidden pane, jsdom): show the whole tally rather than guessing a subset.
-    if (width <= 0) {
-      setShown(tools.length)
+    // Nothing measurable (a hidden pane, jsdom, a top-only rect stub): show the whole tally rather than guessing a subset.
+    if (!(width > 0)) {
+      setShown(count)
       return
     }
     const widths = Array.from(gauge.children, el => el.getBoundingClientRect().width)
     const chips = Array.from(chipGauge.children, el => el.getBoundingClientRect().width)
-    // The widest set that fits WITH the chip it would actually carry, found in one pass from the top down. Measuring
-    // the live chip instead would feed this pass's own output back into its input; measuring only the widest chip
-    // would cost a pill to digits the chip never shows.
+    if (!alwaysMore) {
+      let total = 0
+      for (let i = 0; i < count; i++) total += widths[i] + (i === 0 ? 0 : CHIP_GAP)
+      if (total <= width) {
+        setShown(count)
+        return
+      }
+    }
+    // Widest set that fits WITH the chip it would carry, top down: measuring the live chip would feed the pass its own output.
     let pills = 0
     for (let n = Math.min(widths.length, chips.length - 1); n >= 0; n--) {
-      let total = chips[tools.length - n] + n * PILL_GAP
+      let total = chips[count - n] + n * CHIP_GAP
       for (let i = 0; i < n; i++) total += widths[i]
       if (total <= width) {
         pills = n
@@ -254,7 +220,7 @@ function ToolPills(props: {
       }
     }
     setShown(prev => (prev === pills ? prev : pills))
-  }, [tools])
+  }, [tally, alwaysMore])
 
   // Re-weigh on a new tally; the ResizeObserver covers a pane drag, which changes no prop.
   useLayoutEffect(fit, [fit])
@@ -267,28 +233,105 @@ function ToolPills(props: {
     return () => { observer.disconnect() }
   }, [fit])
   /* v8 ignore stop */
+  return { shown, rowRef, gaugeRef, chipGaugeRef }
+}
 
+interface ToolChipsProps {
+  tools: readonly (readonly [string, number])[]
+  onPick?: (tool: string) => void
+  t: Translate
+  fmt: (n: number) => string
+}
+
+/** The tool lane's chip row: only the tally that fits renders (measured off a hidden gauge) and the tail folds into
+ *  the "+N" chip, so the lane's height depends on the card's width alone and nothing is clipped. */
+function ToolChips(props: ToolChipsProps): ReactElement {
+  const { tools, onPick, t, fmt } = props
+  const { shown, rowRef, gaugeRef, chipGaugeRef } = useFittedChips(tools, true)
+
+  const chip = (name: string, n: number, rank: number, hint = false): ReactElement => {
+    const wire = hint && onPick !== undefined ? pickWire(t('stats.toolJump'), () => { onPick(name) }) : undefined
+    return (
+      <span
+        key={name}
+        className={'lc-ledger-chip' + (wire !== undefined ? ' lc-ledger-chip-btn' : '')}
+        {...(wire ?? { title: name })}
+      >
+        <i style={{ background: TOOL_SHADE(rank) }} />
+        <span className="lc-ledger-chip-label">{name}</span>
+        <b>{fmt(n)}</b>
+      </span>
+    )
+  }
+
+  const shownTools = tools.slice(0, shown)
   return (
-    <>
-      <div className="lc-flow-pills lc-flow-pills-tools" ref={rowRef}>
-        {tools.slice(0, shown).map(([name, n]) => pill(name, n, name))}
-        <span className="lc-flow-pill lc-flow-pill-dim">
-          <span className="lc-flow-pill-label">{t('stats.toolsMore', { n: tools.length - shown })}</span>
-        </span>
-      </div>
-      {/* Off-flow gauges: every pill and every chip width the fit may weigh, so the row can measure the tail it is
-          not showing without rendering it. */}
-      <span className="lc-flow-pill-gauge" aria-hidden="true">
-        <div className="lc-flow-pills" ref={gaugeRef}>{tools.map(([name, n]) => pill(name, n))}</div>
-        <div className="lc-flow-pills" ref={chipGaugeRef}>
+    <div className="lc-ledger-chips lc-ledger-out-chips" ref={rowRef}>
+      {shownTools.map(([name, n], i) => chip(name, n, i, onPick !== undefined))}
+      <span className="lc-ledger-chip lc-ledger-chip-more">
+        <i style={{ background: TOOL_REST }} />
+        <span className="lc-ledger-chip-label">{t('stats.toolsMore', { n: tools.length - shown })}</span>
+      </span>
+      <span className="lc-ledger-gauge" aria-hidden="true">
+        <div className="lc-ledger-chips" ref={gaugeRef}>{tools.map(([name, n], i) => chip(name, n, i))}</div>
+        <div className="lc-ledger-chips" ref={chipGaugeRef}>
           {Array.from({ length: tools.length + 1 }, (_, k) => (
-            <span key={k} className="lc-flow-pill lc-flow-pill-dim">
-              <span className="lc-flow-pill-label">{t('stats.toolsMore', { n: k })}</span>
+            <span key={k} className="lc-ledger-chip lc-ledger-chip-more">
+              <i style={{ background: TOOL_REST }} />
+              <span className="lc-ledger-chip-label">{t('stats.toolsMore', { n: k })}</span>
             </span>
           ))}
         </div>
       </span>
-    </>
+    </div>
+  )
+}
+
+interface CommandChipsProps {
+  commands: readonly (readonly [string, number])[]
+  onPick?: (program: string) => void
+  t: Translate
+  fmt: (n: number) => string
+}
+
+/** The command lane fills its single row: every program fits until the width runs out, then only the tail folds
+ *  into the "+N" chip. Nothing is click-to-expand. */
+function CommandChips(props: CommandChipsProps): ReactElement {
+  const { commands, onPick, t, fmt } = props
+  const { shown, rowRef, gaugeRef, chipGaugeRef } = useFittedChips(commands, false)
+
+  const chip = (name: string, n: number, hint: boolean): ReactElement => {
+    const wire = hint && onPick !== undefined ? pickWire(t('stats.commandJump'), () => { onPick(name) }) : undefined
+    return (
+      <span
+        key={name}
+        className={'lc-ledger-chip' + (wire !== undefined ? ' lc-ledger-chip-btn' : '')}
+        {...(wire ?? { title: name })}
+      >
+        <i style={{ background: TOOL_SHADE(1) }} />
+        <span className="lc-ledger-chip-label">{name}</span>
+        <b>{fmt(n)}</b>
+      </span>
+    )
+  }
+  const more = (hidden: number, key?: string): ReactElement => (
+    <span key={key} className="lc-ledger-chip lc-ledger-chip-more">
+      <i style={{ background: TOOL_REST }} />
+      <span className="lc-ledger-chip-label">{t('stats.toolsMore', { n: hidden })}</span>
+    </span>
+  )
+
+  return (
+    <div className="lc-ledger-chips lc-ledger-in-body2" ref={rowRef}>
+      {commands.slice(0, shown).map(([name, n]) => chip(name, n, true))}
+      {shown < commands.length ? more(commands.length - shown) : null}
+      <span className="lc-ledger-gauge" aria-hidden="true">
+        <div className="lc-ledger-chips" ref={gaugeRef}>{commands.map(([name, n]) => chip(name, n, false))}</div>
+        <div className="lc-ledger-chips" ref={chipGaugeRef}>
+          {Array.from({ length: commands.length + 1 }, (_, k) => more(k, String(k)))}
+        </div>
+      </span>
+    </div>
   )
 }
 
@@ -306,14 +349,11 @@ export function makeStatsContext(
     const cost = estimateSessionCost(usage, book, currency)
     const subCost = estimateSessionCost(subUsage, book, currency)
     const fmtRate = (usd: number): string => formatPriceRate(toCurrency(usd, currency), currency)
-    const rows = priceRowsOf(usage, book)
-    const subRows = priceRowsOf(subUsage ?? undefined, book)
+    const priceState = pricesOf(usage, book)
+    const subPriceState = pricesOf(subUsage ?? undefined, book)
+    const rows = priceState.rows
     const deepseek = usage !== undefined && Object.keys(usage).some(p => isDeepSeekProvider(p))
     const subDeepseek = subUsage !== null && Object.keys(subUsage).some(p => isDeepSeekProvider(p))
-    // Folded usage with no priced row (book not loaded, or it carries none of this scope's models): say so instead of a bare dash.
-    const unpriced = rows.length === 0 && usage !== undefined && Object.keys(usage).length > 0
-      && (failed || book !== null)
-    const subUnpriced = subRows.length === 0 && subUsage !== null && (failed || book !== null)
     const pricesBlock = (blocks: PriceRow[]): ReactNode =>
       blocks.length > 0 ? (
         <span key="prices" className="lc-stat-tip-prices">
@@ -332,126 +372,94 @@ export function makeStatsContext(
           ))}
         </span>
       ) : null
+    const missesBlock = (misses: PriceMissRow[]): ReactNode =>
+      misses.length > 0 ? (
+        <span key="misses" className="lc-stat-tip-prices">
+          {misses.map(m => (
+            <span key={m.key} className="lc-stat-tip-row">
+              {m.miss.reason === 'ambiguous'
+                ? t('stats.costAmbiguous', { p: m.provider, m: m.model, n: String(m.miss.candidates) })
+                : t('stats.costNotListed', { p: m.provider, m: m.model })}
+            </span>
+          ))}
+        </span>
+      ) : null
+    const inferredNote = (blocks: PriceRow[]): ReactNode =>
+      blocks.some(r => r.face.via === 'canonical-maker' || r.face.via === 'family' || r.face.via === 'index')
+        ? <span key="inferred">{t('stats.costInferredNote')}</span>
+        : null
     const notes = (deep: boolean): ReactElement[] =>
       [
         currency === 'cny' ? <span key="cny">{t('stats.costTipCny')}</span> : null,
         deep ? <span key="peak">{t('stats.costTipDeepseek')}</span> : null,
       ].filter((el): el is ReactElement => el !== null)
-    const costTip: ReactNode = [
-      t('stats.costTip'),
+    const tipFor = (state: { rows: PriceRow[]; misses: PriceMissRow[] }, scope: string, deep: boolean): ReactNode => [
+      scope,
       <span key="billed" className="lc-stat-tip-row">{t('stats.billedTip')}</span>,
-      pricesBlock(rows),
-      ...notes(deepseek),
-      unpriced ? <span key="unavailable">{t('stats.costUnavailable')}</span> : null,
+      pricesBlock(state.rows),
+      missesBlock(state.misses),
+      inferredNote(state.rows),
+      ...notes(deep),
+      failed ? <span key="unavailable">{t('stats.costUnavailable')}</span> : null,
     ]
-    const subTip: ReactNode = [
-      t('stats.subCostTip'),
-      <span key="billed" className="lc-stat-tip-row">{t('stats.billedTip')}</span>,
-      pricesBlock(subRows),
-      ...notes(subDeepseek),
-      subUnpriced ? <span key="unavailable">{t('stats.costUnavailable')}</span> : null,
-    ]
-    // Re-measures when the values that move the flow change (the same-string bail-out keeps it loopless); the
-    // ResizeObserver tick covers pane drags, which change no prop.
-    const flowRef = useRef<HTMLDivElement | null>(null)
-    const nodeEls = useRef(new Map<FlowNodeKey, HTMLDivElement>())
-    const [links, setLinks] = useState<FlowLink[]>([])
-    const [resizeTick, setResizeTick] = useState(0)
-    const nodeRef = (key: FlowNodeKey) => (el: HTMLDivElement | null): void => {
-      if (el === null) nodeEls.current.delete(key)
-      else nodeEls.current.set(key, el)
-    }
-    useLayoutEffect(() => {
-      const root = flowRef.current
-      /* v8 ignore next 1 -- the effect only runs while mounted, and the card always renders the flow root. */
-      if (root === null) return
-      const rootBox = root.getBoundingClientRect()
-      const boxes = {} as Record<FlowNodeKey, FlowBox>
-      for (const key of FLOW_NODES) {
-        /* v8 ignore start -- the five nodes render before this layout effect, so every key resolves. */
-        const el = nodeEls.current.get(key)
-        if (el === undefined) return
-        /* v8 ignore stop */
-        const r = el.getBoundingClientRect()
-        boxes[key] = { x: r.left - rootBox.left, y: r.top - rootBox.top, w: r.width, h: r.height }
-      }
-      const next = measureFlow(boxes, root.clientWidth > FLOW_FOLD_PX)
-      setLinks(prev => (prev.length === next.length && prev.every((l, i) => l.d === next[i].d && l.color === next[i].color) ? prev : next))
-      // Chart hover commits never move a flow node: only these inputs (or a ResizeObserver tick) can.
-    }, [
-      props.counts, props.humanInputs, props.answers, props.toolCalls, props.files, props.tools,
-      props.cost, props.locale, props.sessionId, props.onTeamClick, sub.count,
-      // A pane drag only ticks this state; the async subagent usage lands later and moves the flow's text widths.
-      resizeTick, subUsage, book,
-    ])
-    /* v8 ignore start -- jsdom has neither ResizeObserver nor layout: tests pin the geometry through measureFlow's unit tests. */
-    useEffect(() => {
-      const root = flowRef.current
-      if (root === null || typeof ResizeObserver !== 'function') return
-      const observer = new ResizeObserver(() => { setResizeTick(tick => tick + 1) })
-      observer.observe(root)
-      return () => { observer.disconnect() }
-    }, [])
-    /* v8 ignore stop */
-    const head = (label: string, total: ReactNode, tip?: ReactNode, href?: string): ReactElement => {
-      const body = (
-        <>
-          <span className="lc-flow-label">
-            {label}
-            {tip !== undefined && <i className="lc-stat-q group-hover/tip:text-(--dsw-alias-label-primary) group-hover/tip:border-(--dsw-alias-label-primary)" aria-hidden="true">?</i>}
-          </span>
-          <b className="lc-flow-total">{total}</b>
-          {tip !== undefined && <span className="lc-tip lc-stat-tip group-hover/tip:opacity-100" role="tooltip">{tip}</span>}
-        </>
-      )
-      const className = 'lc-flow-head' + (tip === undefined ? '' : ' lc-stat-tipped group/tip')
-      return href === undefined
-        ? <div className={className}>{body}</div>
-        : <a className={className} href={href} target="_blank" rel="noreferrer noopener">{body}</a>
-    }
+    const costTip: ReactNode = tipFor(priceState, t('stats.costTip'), deepseek)
+    const subTip: ReactNode = tipFor(subPriceState, t('stats.subCostTip'), subDeepseek)
+    const ownPriceState = pricesOf(props.cost, book)
+    const ownDeepseek = props.cost !== undefined && Object.keys(props.cost).some(p => isDeepSeekProvider(p))
+    const ownTip: ReactNode = tipFor(ownPriceState, t('stats.ownCostTip'), ownDeepseek)
     const onJump = props.onJump
     const jumpWire = (key: StatsJump, hint = true): JumpWire | undefined => {
       const relay = onJump
       if (relay === undefined) return undefined
-      return {
-        role: 'button',
-        tabIndex: 0,
-        title: hint ? t(JUMP_TIPS[key]) : undefined,
-        onClick: () => { relay(key) },
-        onKeyDown: (ev: KeyboardEvent) => {
-          if (ev.key !== 'Enter' && ev.key !== ' ') return
-          ev.preventDefault()
-          relay(key)
-        },
-      }
+      return pickWire(hint ? t(JUMP_TIPS[key]) : undefined, () => { relay(key) })
     }
-    const pill = (label: string, value: number, cls = '', tip?: ReactNode, jump?: StatsJump): ReactElement => {
-      // A pill with its own ? bubble keeps the native title off: one hover target, one hint.
-      const wire = jump !== undefined ? jumpWire(jump, tip === undefined) : undefined
+    const ioTotal = (props.humanInputs ?? 0) + props.files.reads + props.files.writes + props.files.searches + props.files.images
+    // The head's live tally; the tally's own sum is the fallback on hosts too old to carry it.
+    const toolTotal = props.toolCalls ?? props.tools.reduce((sum, [, n]) => sum + n, 0)
+    const commandTop = props.commands?.top ?? []
+    const chip = (
+      key: string,
+      label: string,
+      value: number,
+      color: string,
+      opts: { title?: string; tip?: ReactNode; jump: StatsJump },
+    ): ReactElement => {
+      // A chip with its own ? bubble keeps the native title off: one hover target, one hint.
+      const wire = jumpWire(opts.jump, opts.tip === undefined)
       return (
         <span
-          key={label}
-          className={'lc-flow-pill' + cls + (wire === undefined ? '' : ' lc-flow-pill-btn') + (value === 0 ? ' lc-flow-pill-dim' : '') + (tip === undefined ? '' : ' lc-stat-tipped group/tip')}
+          key={key}
+          className={'lc-ledger-chip'
+            + (wire !== undefined ? ' lc-ledger-chip-btn' : '')
+            + (value === 0 ? ' lc-ledger-chip-dim' : '')
+            + (opts.tip !== undefined ? ' lc-stat-tipped group/tip' : '')}
           {...(wire ?? {})}
+          title={opts.title}
         >
-          <span className="lc-flow-pill-label">
+          <i style={{ background: color }} />
+          <span className="lc-ledger-chip-label">
             {label}
-            {tip !== undefined && <i className="lc-stat-q group-hover/tip:text-(--dsw-alias-label-primary) group-hover/tip:border-(--dsw-alias-label-primary)" aria-hidden="true">?</i>}
+            {opts.tip !== undefined && <i className="lc-stat-q group-hover/tip:text-(--dsw-alias-label-primary) group-hover/tip:border-(--dsw-alias-label-primary)" aria-hidden="true">?</i>}
           </span>
           <b>{fmt(value)}</b>
-          {tip !== undefined && <span className="lc-tip lc-stat-tip group-hover/tip:opacity-100" role="tooltip">{tip}</span>}
+          {opts.tip !== undefined && <span className="lc-tip lc-stat-tip group-hover/tip:opacity-100" role="tooltip">{opts.tip}</span>}
         </span>
       )
     }
     const figure = (key: 'skills' | 'answers', value: number, label: string): ReactElement => {
       const wire = jumpWire(key)
       return (
-        <span key={key} className={'lc-flow-kv' + (wire === undefined ? '' : ' lc-flow-kv-btn')} {...(wire ?? {})}>
+        <span key={key} className={'lc-core-kv lc-core-kv-' + key + (wire === undefined ? '' : ' lc-core-kv-btn')} {...(wire ?? {})}>
           <b>{fmt(value)}</b>
           <i>{label}</i>
         </span>
       )
     }
+    const emptyChip = (key: string): ReactElement => (
+      <span key={key} className="lc-ledger-chip lc-ledger-chip-dim">
+        <span className="lc-ledger-chip-label">{t('stats.laneEmpty')}</span>
+      </span>
+    )
     const costPids = new Set(rows.map(r => r.face.pid).filter(p => p !== ''))
     const costHref = costPids.size === 1 ? 'https://models.dev/providers/' + [...costPids][0] + '/' : undefined
     const ownCost = estimateSessionCost(props.cost, book, currency)
@@ -459,101 +467,125 @@ export function makeStatsContext(
     const ownTokens = billedTokensOf(props.cost)
     const subTokens = billedTokensOf(subUsage)
     const pair = (tokens: number, costText: string): ReactElement => (
-      <span className="lc-flow-pair"><b>{fmt(tokens)}</b><i>/</i><b>{costText}</b></span>
+      <span className="lc-strip-pair"><b>{fmt(tokens)}</b><i>/</i><b>{costText}</b></span>
     )
     const costText = cost === null ? '—' : formatCost(cost, currency)
     const ownText = ownCost === null ? '—' : formatCost(ownCost, currency)
     const subText = subCost === null ? '—' : formatCost(subCost, currency)
-    // The card this cell tallies lives on its own view, and only the caller knows where it serves it.
+    const teamPair = pair(familyTokens, costText)
     const openTeam = props.onTeamClick
     const onTeamClick = (ev: MouseEvent): void => {
-      if ((ev.target as HTMLElement).closest('a') !== null) return
+      if ((ev.target as HTMLElement).closest('a, button') !== null) return
       openTeam?.()
     }
-    const onTeamKeyDown = (ev: KeyboardEvent): void => {
-      if (ev.key !== 'Enter' && ev.key !== ' ') return
-      ev.preventDefault()
-      openTeam?.()
-    }
-    const ioTotal = (props.humanInputs ?? 0) + props.files.reads + props.files.writes + props.files.searches + props.files.images
-    // The head's live tally; the pills' own sum is the fallback on hosts too old to carry it.
-    const toolTotal = props.toolCalls ?? props.tools.reduce((sum, [, n]) => sum + n, 0)
+    const costRow = (key: string, content: ReactNode): ReactElement => (
+      openTeam === undefined
+        ? <span key={key} className="lc-strip-cell lc-ledger-cost-row lc-stat-tipped group/tip">{content}</span>
+        : <button key={key} type="button" className="lc-strip-cell lc-ledger-cost-row lc-ledger-cost-row-btn lc-stat-tipped group/tip" onClick={openTeam}>{content}</button>
+    )
     return (
       <div className="lc-card flex-[3] min-w-[min(360px,100%)]">
         <div className="lc-card-title">
           <span className="lc-card-title-text">{t('stats.title')}</span>
         </div>
-        <div className="lc-stats lc-flow" ref={flowRef}>
-          {/* Under the nodes; ordered left→right / top→bottom so the traveling dashes read in flow order. */}
-          <svg className="lc-flow-svg" aria-hidden="true">
-            {links.map((l, i) => (
-              // Fixed four-link set in fixed order: the index IS the identity (zero-measured boxes produce identical d strings).
-              <g key={i}>
-                <path className="lc-flow-ribbon" d={l.d} stroke={l.color} />
-                <path className="lc-flow-dash animate-lc-agent-flow motion-reduce:animate-none" d={l.d} stroke={l.color} />
-              </g>
-            ))}
-          </svg>
-          <div className="lc-flow-col">
-            <div className="lc-flow-node" ref={nodeRef('inputs')}>
-              {head(t('stats.io'), fmt(ioTotal))}
-              {/* Searches and image reads pill only when they happened; the three zero counts stay visible. */}
-              <div className="lc-flow-pills">
-                {pill(t('stats.humanInputs'), props.humanInputs ?? 0, '', t('stats.humanInputsTip'), 'inputs')}
-                {pill(t('files.kind.read'), props.files.reads, '', undefined, 'read')}
-                {pill(t('files.kind.write'), props.files.writes, '', undefined, 'write')}
-                {props.files.searches > 0 ? pill(t('files.kind.search'), props.files.searches, '', undefined, 'search') : null}
-                {props.files.images > 0 ? pill(t('files.kind.image'), props.files.images, '', undefined, 'image') : null}
-              </div>
+        <div className="lc-stats">
+          <div className="lc-ledger">
+            <div className="lc-ledger-head lc-ledger-in-head">
+              <span className="lc-ledger-label">{t('stats.io')}</span>
+              <b className="lc-ledger-total">{fmt(ioTotal)}</b>
             </div>
-            <div className="lc-flow-node" ref={nodeRef('events')}>
-              {head(t('stats.events'), fmt(props.counts.injects + props.counts.compactions + props.counts.prunes))}
-              <div className="lc-flow-pills">
-                {EVENT_PILLS.map(p => pill(t('kind.' + p.kind), props.counts[p.tally], ' lc-flow-pill-tint ' + p.cls))}
-              </div>
-            </div>
-          </div>
-          <div className="lc-flow-mid">
-            <div className="lc-flow-node lc-flow-self" ref={nodeRef('session')}>
-              <span className="lc-flow-label">{t('stats.session')}</span>
-              <span className="lc-flow-self-stats">
-                <span className="lc-flow-kv"><b>{fmt(props.counts.turns)}</b><i>{t('stats.turns')}</i></span>
-                <span className="lc-flow-kv"><b>{fmt(props.counts.steps)}</b><i>{t('stats.steps')}</i></span>
+            <div className="lc-core">
+              <span className="lc-core-label">{t('stats.session')}</span>
+              <span className="lc-core-kvs lc-core-kvs-main">
+                <span className="lc-core-kv lc-core-kv-turns"><b>{fmt(props.counts.turns)}</b><i>{t('stats.turns')}</i></span>
+                <span className="lc-core-kv lc-core-kv-steps"><b>{fmt(props.counts.steps)}</b><i>{t('stats.steps')}</i></span>
               </span>
-              <span className="lc-flow-self-stats">
+              <span className="lc-core-kvs">
                 {figure('skills', props.counts.skills ?? 0, t('stats.skills'))}
                 {figure('answers', props.answers ?? 0, t('stats.answers'))}
               </span>
+              <span className="lc-core-kv lc-core-kv-events">
+                <i>{t('stats.events')}</i>
+                <span className="lc-core-kv-events-list">
+                  {EVENT_PILLS.map((p, index) => {
+                    const n = props.counts[p.tally]
+                    const wire = props.onEventsClick === undefined
+                      ? undefined
+                      : pickWire(t('stats.eventsKindJump', { kind: t('kind.' + p.kind) }), () => { props.onEventsClick?.(p.kind) })
+                    return (
+                      <Fragment key={p.kind}>
+                        {index > 0 ? <span className="lc-core-kv-sep" aria-hidden="true">/</span> : null}
+                        <span
+                          className={'lc-kind ' + p.cls + ' lc-core-kv-event'
+                            + (wire === undefined ? '' : ' lc-core-kv-event-btn')
+                            + (n === 0 ? ' lc-ledger-chip-dim' : '')}
+                          data-kind={p.kind}
+                          {...(wire ?? {})}
+                        >
+                          {t('kind.' + p.kind)}
+                          <b>{fmt(n)}</b>
+                        </span>
+                      </Fragment>
+                    )
+                  })}
+                </span>
+              </span>
             </div>
-          </div>
-          <div className="lc-flow-col lc-flow-col-r">
-            <div className="lc-flow-node" ref={nodeRef('tools')}>
-              {head(t('stats.toolCalls'), fmt(toolTotal))}
-              <ToolPills tools={props.tools} t={t} fmt={fmt} />
+            <div className="lc-ledger-head lc-ledger-out-head">
+              <span className="lc-ledger-label">{t('stats.toolCalls')}</span>
+              <b className="lc-ledger-total">{fmt(toolTotal)}</b>
             </div>
-            <div
-              className="lc-flow-node lc-flow-team"
-              ref={nodeRef('cost')}
-              role={openTeam === undefined ? undefined : 'button'}
-              tabIndex={openTeam === undefined ? undefined : 0}
-              onClick={onTeamClick}
-              onKeyDown={onTeamKeyDown}
-            >
-              {head(t('agents.title'), pair(familyTokens, costText), costTip, costHref)}
-              <div className="lc-flow-rows">
-                <div className="lc-flow-row">
-                  <span className="lc-flow-row-label">{t('stats.currentAgent')}</span>
+            <ToolChips tools={props.tools} onPick={props.onToolPick} t={t} fmt={fmt} />
+            <div className="lc-ledger-head lc-ledger-in-head2">
+              <span className="lc-ledger-label">{t('stats.commands')}</span>
+              <b className="lc-ledger-total">{fmt(props.commands?.runs ?? 0)}</b>
+            </div>
+            <div className="lc-ledger-team">
+              <div
+                className={'lc-ledger-head lc-ledger-out-head2 lc-ledger-team-head lc-ledger-cost-row' + (openTeam === undefined ? '' : ' lc-ledger-cost-row-btn')}
+                onClick={openTeam === undefined ? undefined : onTeamClick}
+              >
+                <span className="lc-strip-cell lc-ledger-team-pair lc-stat-tipped group/tip">
+                  <i>
+                    {openTeam === undefined
+                      ? <span className="lc-ledger-label">{t('stats.fleet')}</span>
+                      : <button type="button" className="lc-ledger-label lc-ledger-team-open" onClick={openTeam}>{t('stats.fleet')}</button>}
+                    <i className="lc-stat-q group-hover/tip:text-(--dsw-alias-label-primary) group-hover/tip:border-(--dsw-alias-label-primary)" aria-hidden="true">?</i>
+                  </i>
+                  <span className="lc-ledger-total">
+                    {costHref === undefined ? teamPair : <a className="lc-strip-link" href={costHref} target="_blank" rel="noreferrer noopener">{teamPair}</a>}
+                  </span>
+                </span>
+                <span className="lc-tip lc-stat-tip group-hover/tip:opacity-100" role="tooltip" aria-hidden="true">{costTip}</span>
+              </div>
+              <div className="lc-ledger-out-body2">
+                {costRow('own', <>
+                  <i>
+                    {t('stats.currentAgent')}
+                    <i className="lc-stat-q group-hover/tip:text-(--dsw-alias-label-primary) group-hover/tip:border-(--dsw-alias-label-primary)" aria-hidden="true">?</i>
+                  </i>
                   {pair(ownTokens, ownText)}
-                </div>
-                <div className="lc-flow-row lc-stat-tipped group/tip">
-                  <span className="lc-flow-row-label">
+                  <span className="lc-tip lc-stat-tip group-hover/tip:opacity-100" role="tooltip" aria-hidden="true">{ownTip}</span>
+                </>)}
+                {costRow('subs', <>
+                  <i>
                     {t('stats.teamSubs', { n: sub.count })}
                     <i className="lc-stat-q group-hover/tip:text-(--dsw-alias-label-primary) group-hover/tip:border-(--dsw-alias-label-primary)" aria-hidden="true">?</i>
-                  </span>
+                  </i>
                   {pair(subTokens, subText)}
-                  <span className="lc-tip lc-stat-tip group-hover/tip:opacity-100" role="tooltip">{subTip}</span>
-                </div>
+                  <span className="lc-tip lc-stat-tip group-hover/tip:opacity-100" role="tooltip" aria-hidden="true">{subTip}</span>
+                </>)}
               </div>
+            </div>
+            {commandTop.length === 0
+              ? <div className="lc-ledger-chips lc-ledger-in-body2">{emptyChip('in')}</div>
+              : <CommandChips commands={commandTop} onPick={props.onCommandPick} t={t} fmt={fmt} />}
+            <div className="lc-ledger-chips lc-ledger-in-chips">
+              {chip('inputs', t('stats.user'), props.humanInputs ?? 0, IO_COLOR.inputs, { jump: 'inputs', tip: t('stats.userTip') })}
+              {chip('read', t('stats.fileRead'), props.files.reads, IO_COLOR.read, { jump: 'read', title: t('stats.filesJump') })}
+              {chip('write', t('stats.fileWrite'), props.files.writes, IO_COLOR.write, { jump: 'write', title: t('stats.filesJump') })}
+              {props.files.searches > 0 ? chip('search', t('stats.fileSearch'), props.files.searches, IO_COLOR.search, { jump: 'search', title: t('stats.filesJump') }) : null}
+              {props.files.images > 0 ? chip('image', t('stats.fileImage'), props.files.images, IO_COLOR.image, { jump: 'image', title: t('stats.filesJump') }) : null}
             </div>
           </div>
         </div>

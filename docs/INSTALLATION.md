@@ -1,5 +1,7 @@
 # 安装与插件面板排查
 
+内置 dsh-context 0.77.0 要求 DSH 0.2.0-rc.2 或更高版本。
+
 ## 从源码生成安装包
 
 ```bash
@@ -15,8 +17,8 @@ npm run release:build
 
 输出位于 `releases/`，采用 `<包名>-<版本>-<OS>-<CPU>.tgz` 命名：
 
-- Apple Silicon（M 系列）：`dsh-super-nexusx-0.11.6-darwin-arm64.tgz`。
-- Intel：`dsh-super-nexusx-0.11.6-darwin-x64.tgz`。
+- Apple Silicon（M 系列）：`dsh-super-nexusx-0.11.10-darwin-arm64.tgz`。
+- Intel：`dsh-super-nexusx-0.11.10-darwin-x64.tgz`。
 
 发行包要求 macOS 13+。每个 tgz 均内置对应 CPU 的原生桌面宠物程序、桌面网页、完整插件及提示音，不需要额外安装另一个程序。包清单包含 `os` / `cpu` 约束，`BUILD_INFO.json` 记录目标架构及原生程序校验值。源码编译需要 macOS SDK，使用下载好的发行包无需 Swift 或 Xcode。
 
@@ -28,7 +30,7 @@ M 芯片应选择 arm64 包；旧 0.11.5 包的 Intel 伴随程序也可能通�
 
 ```bash
 # Apple Silicon 示例；Intel 将文件名改为 darwin-x64；按实际安装修改 home 与 Profile
-DSH_HOME="$HOME/.dsh-beta" dsh plugin --profile desktop add ./releases/dsh-super-nexusx-0.11.6-darwin-arm64.tgz
+DSH_HOME="$HOME/.dsh-beta" dsh plugin --profile desktop add ./releases/dsh-super-nexusx-0.11.10-darwin-arm64.tgz
 DSH_HOME="$HOME/.dsh-beta" dsh plugin --profile desktop list dsh-super-nexusx
 ```
 
@@ -39,7 +41,7 @@ DSH_HOME="$HOME/.dsh-beta" ELECTRON_RUN_AS_NODE=1 \
   "/Applications/DSH Desktop Beta.app/Contents/MacOS/DSH Desktop Beta" \
   --expose-internals \
   "/Applications/DSH Desktop Beta.app/Contents/Resources/app/lib/desktop-cli.js" \
-  plugin --profile desktop add ./releases/dsh-super-nexusx-0.11.6-darwin-arm64.tgz
+  plugin --profile desktop add ./releases/dsh-super-nexusx-0.11.10-darwin-arm64.tgz
 ```
 
 Desktop 的 CLI 版本应与其内置 DSH 运行时匹配。不要用不兼容的全局 CLI 覆盖 Desktop 的依赖或关闭宿主包龄策略。安装后重新打开 DSH，在已安装插件中查找包名 `dsh-super-nexusx`。同一 Profile 中只启用一个目录/主题增强实现；内置的 dsh-context 集成启用时，建议停用独立的 dsh-context，避免重复面板。

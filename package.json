@@ -1,6 +1,6 @@
 {
   "name": "dsh-super-nexusx",
-  "version": "0.11.6",
+  "version": "0.11.10",
   "description": "DSH Super Nexusx（DSH 超级工作台）：集成 Liquid Glass 主题、会话目录、陪伴宠物与上下文系统的 DSH 扩展",
   "type": "module",
   "license": "MIT",

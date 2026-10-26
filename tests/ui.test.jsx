@@ -352,6 +352,24 @@ test('context summary shares upstream pricing, current occupancy and daily ledge
   assert.equal(summarizeContext({byId:{}}, book).occupancy,null);
 });
 
+test('pet pricing passes canonical model identities to the upstream multi-vendor resolver', () => {
+  const model = (canonical, input) => ({canonical_model_id:canonical,cost:{input,output:input}});
+  const book = priceBook({
+    gateway:{models:{'vendor-a-model':model('vendor-a/model',1),'vendor-b-model':model('vendor-b/model',2)}},
+    'vendor-b':{models:{other:model('vendor-b/other',3)}},
+  });
+  const cost = {gateway:{other:{off:{uncached:150000,cacheRead:0,cacheWrite:0,output:0}}}};
+  const snapshot = {current:'a',byId:{a:{id:'a',projectionValues:{contextTimeline:{cost}}}}};
+  assert.equal(summarizeContext(snapshot,book).sessionCost,'¥3.00');
+});
+
+test('pet pricing does not report unpriced subscription-plan usage as a free API call', () => {
+  const book = priceBook({'example-coding-plan':{models:{exclusive:{cost:{input:0,output:0}}}}});
+  const cost = {'example-coding-plan':{exclusive:{off:{uncached:150000,cacheRead:0,cacheWrite:0,output:0}}}};
+  const snapshot = {current:'a',byId:{a:{id:'a',projectionValues:{contextTimeline:{cost}}}}};
+  assert.equal(summarizeContext(snapshot,book).sessionCost,null);
+});
+
 test('pet bubble retains balance through an outage and closes by deadline after pointer leave', async t => {
   const controller=createController({initial:emptyState(),poll:false,persist:async(state,op)=>applyOperation(state,op,catalog)});
   let failed=false;

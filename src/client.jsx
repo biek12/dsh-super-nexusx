@@ -29,7 +29,6 @@ const PALETTE = {
   '--dsw-alias-bg-base': { light: '#fafbfc', dark: '#171a20' },
   '--dsw-alias-bg-layer-1': { light: '#fafbfc', dark: '#171a20' },
   '--dsw-alias-bg-layer-2': { light: '#ffffff', dark: '#20242c' },
-  '--dsw-specific-sidebar-fill': { light: 'rgba(241,244,249,.72)', dark: 'rgba(33,37,47,.76)' },
   '--dsw-alias-label-primary': { light: '#20232b', dark: '#e9edf4' },
   '--dsw-alias-label-secondary': { light: '#777f8e', dark: '#979dab' },
   '--dsw-alias-interactive-bg-hover': { light: 'rgba(0,0,0,.035)', dark: 'rgba(255,255,255,.06)' },

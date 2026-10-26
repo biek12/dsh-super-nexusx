@@ -7,7 +7,7 @@
 | `src/` | Host、客户端、目录、主题、上下文适配与宠物 |
 | `desktop/` | macOS AppKit / WebKit 伴随窗口 |
 | `assets/pets/` | 运行时角色素材 |
-| `vendor/dsh-context/` | 固定在 0.74.0 的上游源码与发布 bundle |
+| `vendor/dsh-context/` | 固定在 0.77.0 的上游源码与发布 bundle |
 | `licenses/` | 第三方完整许可 |
 | `tests/` | 数据、HTTP、生命周期和 UI 回归测试 |
 | `preview/` | 本机交互预览 |

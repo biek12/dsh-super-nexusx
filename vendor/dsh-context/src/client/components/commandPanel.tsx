@@ -1,12 +1,20 @@
-import { memo, useMemo, useState, type ChangeEvent, type ComponentType, type MouseEvent, type ReactElement } from 'react'
-import { attentionOf, byLatest, bySlowest, durationOf, matchesFilter, matchesQuery, previewOf, previewTextOf, programsOf, tallyOfCommands } from '../commands'
-import type { Command, CommandFilter, CommandSort } from '../commands'
+import { memo, Fragment, useEffect, useMemo, useRef, useState, type ComponentType, type MouseEvent, type ReactElement, type ReactNode } from 'react'
+import { useCodeHighlighter } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { HighlightSpan } from '@deepseek-ai/dsh-client-ui-primitives'
+import { attentionOf, byLatest, bySlowest, durationOf, matchesFilter, matchesQuery, previewTextOf, programsOf, resultTextOf, surfaceSeqOf, tallyOfCommands, viewsOf } from '../commands'
+import type { Command, CommandFilter, CommandSort, CommandView } from '../commands'
+import { grammarOfTool, highlightRuns } from '../commandHighlight'
+import type { ContentFetcher } from '../services'
 import { nameColorOf } from '../nameColor'
-import { shapeOfCmd } from '../../shared/commands'
 import type { CommandStats } from '../../shared/types'
 import type { DetailState } from '../timelineSource'
 import type { ViewKit } from '../viewkit'
+import { ClearableInput } from './clearableInput'
 import { makeDetailNote } from './detailNote'
+import { makeRichText } from './richText'
+import { IconShare } from '../primitives'
+import { Section } from './section'
+import { useRowWindow } from './useRowWindow'
 
 export interface CommandPanelProps {
   commands: Command[]
@@ -19,16 +27,42 @@ export interface CommandPanelProps {
   stampOf?: (seq: number) => { turn: number; step: number } | null
   /** Reveal the run's result message in the Context Browser; absent = no reveal affordance. */
   onLocate?: (rec: Command) => void
+  /** A one-shot text lens the panel opens with (the stats card's command pick seeds the program's name). */
+  focusQuery?: string | null
+  onFocusQueryHandled?: () => void
+  /** On-demand content for one surface-node seq; absent = the detail serves no result block. */
+  fetchContent?: ContentFetcher
   state?: DetailState
   onRetry?: () => void
+}
+
+/** Command text as its highlight runs (one span per run), or the plain text when no run set reached the renderer. The
+ *  runs carry the text verbatim, so browser find, select-all, the copy control and the panel's find lens all read the
+ *  same characters they would without coloring. */
+function CmdText(props: { text: string; runs: readonly HighlightSpan[][] | undefined }): ReactElement {
+  const { runs } = props
+  if (runs === undefined) return <>{props.text}</>
+  return (
+    <>
+      {runs.map((line, index) => (
+        <Fragment key={index}>
+          {index === 0 ? null : '\n'}
+          {line.map((run, at) => <span key={at} style={run.style}>{run.text}</span>)}
+        </Fragment>
+      ))}
+    </>
+  )
 }
 
 export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps> {
   const { t, fmt, fmtTime, fmtDuration } = kit
   const DetailNote = makeDetailNote(kit)
+  const rich = makeRichText(kit)
 
   const FILTERS: readonly CommandFilter[] = ['all', 'failed', 'slow', 'background']
   const SORTS: readonly CommandSort[] = ['latest', 'slowest']
+  /** Below this many matched rows the full list stays in the DOM (browser find, select-all); above it the list windows. */
+  const WINDOW_MIN_ROWS = 100
 
   function statusGlyphOf(rec: Command): { glyph: string; cls: string; tip: string } {
     if (rec.status === 'running') return { glyph: '◐', cls: 'run', tip: t('cmds.status.running') }
@@ -37,46 +71,159 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
     return { glyph: '⊘', cls: 'kill', tip: t(rec.stopped === true ? 'cmds.status.stopped' : 'cmds.status.killed') }
   }
 
+  /** One section card carrying the browser's copy + find pair; the find lens marks matches inside the keyed body only. */
+  function FindCard(props: {
+    label: string
+    text: string
+    meta?: ReactNode
+    leading?: ReactNode
+    trailing?: ReactNode
+    children: ReactNode
+  }): ReactElement {
+    const find = rich.useRichFind(props.text, 'raw')
+    return (
+      <Section
+        label={props.label}
+        foldHead
+        meta={props.meta}
+        actions={<>
+          {props.leading}
+          <rich.RichCopy text={props.text} />
+          {find.button}
+        </>}
+      >
+        {find.bar}
+        {/* Keyed by the text itself: a content change remounts the body outright, so React never diffs over the find bar's DOM marks. */}
+        <div key={find.bodyKey} ref={find.bodyRef}>{props.children}</div>
+        {props.trailing}
+      </Section>
+    )
+  }
+
   return memo(function CommandPanel(props: CommandPanelProps): ReactElement {
     // The memo must not block a locale switch: the tick re-renders on it even when the props are reference-stable.
     kit.useLocaleTick()
+    // One binding per shell grammar, held for the mount; a lazy grammar (powershell) colors its rows on the load tick,
+    // which the hook's own store subscription drives, and stays plain until then.
+    const highlightShell = useCodeHighlighter('bash')
+    const highlightPwsh = useCodeHighlighter('powershell')
+    const runsOf = (tool: string, text: string): readonly HighlightSpan[][] | undefined => {
+      const grammar = grammarOfTool(tool)
+      if (grammar === undefined) return undefined
+      return highlightRuns(grammar === 'bash' ? highlightShell : highlightPwsh, grammar, text)
+    }
     const { commands } = props
     const [filter, setFilter] = useState<CommandFilter>('all')
     const [sort, setSort] = useState<CommandSort>('latest')
     const [query, setQuery] = useState('')
+    const [programPick, setProgramPick] = useState<string | null>(null)
     const [openSeq, setOpenSeq] = useState<number | null>(null)
-    const [copiedSeq, setCopiedSeq] = useState<number | null>(null)
+    // The expanded row's result content, read once per target seq through the shared content fetcher (it caches);
+    // `miss` is a seq outside the loaded window, `empty` a node with no text blocks, `failed` a rejected read.
+    type ResultRead = { state: 'loading' } | { state: 'miss' } | { state: 'empty' } | { state: 'failed' } | { state: 'ready'; text: string }
+    const [results, setResults] = useState<Partial<Record<number, ResultRead>>>({})
+    const openRec = openSeq === null ? undefined : commands.find(rec => rec.seq === openSeq)
+    const openTarget = openRec !== undefined ? surfaceSeqOf(openRec) : undefined
+    useEffect(() => {
+      const fetchContent = props.fetchContent
+      if (openTarget === undefined || fetchContent === undefined) return
+      let live = true
+      setResults(cur => (cur[openTarget] !== undefined ? cur : { ...cur, [openTarget]: { state: 'loading' } }))
+      void fetchContent(openTarget).then(
+        (node) => {
+          if (!live) return
+          const text = node === null ? null : resultTextOf(node)
+          setResults(cur => ({ ...cur, [openTarget]: node === null ? { state: 'miss' } : text === null ? { state: 'empty' } : { state: 'ready', text } }))
+        },
+        () => { if (live) setResults(cur => ({ ...cur, [openTarget]: { state: 'failed' } })) },
+      )
+      return () => { live = false }
+    }, [openTarget, props.fetchContent])
 
     const q = query.trim().toLowerCase()
-    // Every matched row renders — the list is the whole point. Offscreen rows skip their paint via
-    // `content-visibility: auto` (the file card's own idiom), so a 400-row log costs no layout storm.
+    const views = useMemo(() => viewsOf(commands, props.workspace), [commands, props.workspace])
+    // The chip counts describe the search + picked-program scope (what picking a chip would show); the chip then
+    // narrows the list. The program ranking stays global, so none of the right-side filters move it.
+    const searched = useMemo(() => views.filter(view => matchesQuery(view.rec, q, view.program)), [views, q])
+    const picked = useMemo(
+      () => (programPick === null ? searched : searched.filter(view => view.program === programPick)),
+      [searched, programPick],
+    )
+    const scoped = useMemo(() => picked.filter(view => matchesFilter(view.rec, filter)), [picked, filter])
     const shown = useMemo(
-      () => commands
-        .filter(rec => matchesFilter(rec, filter) && matchesQuery(rec, q))
-        .sort(sort === 'slowest' ? bySlowest : byLatest),
-      [commands, filter, q, sort],
+      () => scoped.slice().sort((a, b) => (sort === 'slowest' ? bySlowest(a.rec, b.rec) : byLatest(a.rec, b.rec))),
+      [scoped, sort],
     )
     const tally = props.stats ?? tallyOfCommands(commands)
     const counts = useMemo(() => ({
-      all: commands.length,
-      failed: commands.filter(r => matchesFilter(r, 'failed')).length,
-      slow: commands.filter(r => matchesFilter(r, 'slow')).length,
-      background: commands.filter(r => matchesFilter(r, 'background')).length,
-    }), [commands])
-    const programs = useMemo(() => programsOf(commands), [commands])
-    const attention = useMemo(() => attentionOf(commands), [commands])
+      all: picked.length,
+      failed: picked.filter(view => matchesFilter(view.rec, 'failed')).length,
+      slow: picked.filter(view => matchesFilter(view.rec, 'slow')).length,
+      background: picked.filter(view => matchesFilter(view.rec, 'background')).length,
+    }), [picked])
+    const programs = useMemo(() => programsOf(views), [views])
+    const attention = useMemo(() => attentionOf(scoped), [scoped])
+    // A trimmed or refreshed log can drop a picked program; clearing the pick keeps the list from sticking empty.
+    useEffect(() => {
+      if (programPick === null || programs.some(p => p.name === programPick)) return
+      setProgramPick(null)
+    }, [programPick, programs])
+
+    const listRef = useRef<HTMLDivElement | null>(null)
+    const [rowPitch, setRowPitch] = useState(0)
+    const [rowGap, setRowGap] = useState(0)
+    // Fixed-height rows, so one measured pitch holds for the mount.
+    const measured = useRef(false)
+    useEffect(() => {
+      if (measured.current || openSeq !== null || shown.length < WINDOW_MIN_ROWS) return
+      const el = listRef.current
+      /* v8 ignore next 1 -- the list renders whenever `shown` is non-empty; the guard covers a mid-swap render. */
+      if (el === null) return
+      const items = [...el.querySelectorAll<HTMLElement>('.lc-cmd-item')]
+      /* v8 ignore next 1 -- the committed full-list render is what arms this effect. */
+      if (items.length !== shown.length) return
+      measured.current = true
+      const rects = items.map(item => item.getBoundingClientRect())
+      const height = Math.round(rects[0].height)
+      const uniform = height > 4 && rects.every(r => Math.abs(Math.round(r.height) - height) <= 1)
+      if (!uniform) return
+      const pitch = rects[1].top - rects[0].top
+      /* v8 ignore next 1 -- uniform rows taller than 4px always pitch past 4px. */
+      if (Number.isFinite(pitch) && pitch > 4) {
+        setRowPitch(Math.round(pitch))
+        setRowGap(Math.max(0, Math.round(pitch - height)))
+      }
+    }, [openSeq, shown.length])
+    const windowed = openSeq === null && rowPitch > 0 && shown.length >= WINDOW_MIN_ROWS
+    const rowRange = useRowWindow(listRef, shown.length, rowPitch, windowed)
+    const lastRow = Math.max(0, shown.length - 1)
+    // A filter/sort can shrink the list under a stale range for one render; clamping keeps the window non-empty.
+    const windowFrom = Math.min(rowRange.from, lastRow)
+    const windowTo = Math.min(rowRange.to, lastRow)
     const [progQuery, setProgQuery] = useState('')
     /** A rail preview keeps to a tight budget; the full text is one click into the row. */
     const railPreview = (cmd: string): string => {
       const first = previewTextOf(cmd, props.workspace)
       return first.length > 34 ? first.slice(0, 34) + '…' : first
     }
-    /** An attention row is an exclusive lens: it clears the previous filter, query and sort before applying its own. */
-    const applyLens = (patch: { filter?: CommandFilter; query?: string; sort?: CommandSort }): void => {
+    /** An attention row is an exclusive lens: it clears the previous filter, query, sort and program pick before
+     *  applying its own. */
+    const applyLens = (patch: { filter?: CommandFilter; query?: string; sort?: CommandSort; program?: string | null }): void => {
+      setProgramPick(patch.program ?? null)
       setFilter(patch.filter ?? 'all')
       setQuery(patch.query ?? '')
       setSort(patch.sort ?? 'latest')
     }
+    // The stats card's pick is one-shot: hand the slot back so the same program can fire again.
+    const focusQuery = props.focusQuery
+    useEffect(() => {
+      if (focusQuery === undefined || focusQuery === null) return
+      setProgramPick(null)
+      setFilter('all')
+      setQuery(focusQuery)
+      setSort('latest')
+      props.onFocusQueryHandled?.()
+    }, [focusQuery, props.onFocusQueryHandled])
 
     interface AttentionRow {
       key: string
@@ -93,8 +240,8 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
     }
     if (attention.failing !== undefined) {
       const f = attention.failing
-      // The click lands on exactly the named program's failures (the query lens covers program identity).
-      attentionRows.push({ key: 'failing', label: t('cmds.rail.failing'), value: f.program, n: '×' + fmt(f.count), apply: () => { applyLens({ filter: 'failed', query: f.program }) } })
+      // The pick lands on exactly the named program's failures; a text query would also catch look-alikes.
+      attentionRows.push({ key: 'failing', label: t('cmds.rail.failing'), value: f.program, n: '×' + fmt(f.count), apply: () => { applyLens({ filter: 'failed', program: f.program }) } })
     }
     if (attention.repeats !== undefined) {
       const r = attention.repeats
@@ -108,21 +255,26 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
     const totalPrograms = Math.max(1, programs.reduce((sum, p) => sum + p.n, 0))
     const topProgramN = Math.max(1, ...programs.map(p => p.n))
     const pq = progQuery.trim().toLowerCase()
-    // The query applies only while its input is visible — a trimmed log could drop the program count past the
-    // search threshold with a stale query, and an invisible box cannot be cleared.
-    const shownPrograms = programs.length > 6 && pq !== '' ? programs.filter(p => p.name.toLowerCase().includes(pq)) : programs
+    // A query keeps its input visible below the threshold: a trimmed or refreshed log can drop the ranking under
+    // it, and an invisible box cannot be cleared. The picked program stays visible so the highlight never disappears.
+    const showProgSearch = programs.length > 6 || pq !== ''
+    const shownPrograms = programs.filter(p => p.name === programPick || pq === '' || p.name.toLowerCase().includes(pq))
 
-    const rail = commands.length > 0 ? (
+    const loadingChannel = commands.length === 0 && props.state === 'loading'
+    const failedChannel = commands.length === 0 && props.state === 'failed'
+    const showRail = !loadingChannel && !failedChannel
+    const totalTime = commands.length === 0 ? '0' : fmtDuration(tally.ms)
+    const rail = showRail ? (
       <div className="lc-cmd-rail">
         <div className="lc-cmd-rail-sec">
-          <div className="lc-cmd-rail-h">{t('cmds.rail.summary')}</div>
+          <div className="lc-cmd-rail-h" title={t('cmds.rail.summaryTip')}>{t('cmds.rail.summary')}</div>
           <div className="lc-cmd-kpis">
             <div className="lc-cmd-kpi"><b>{fmt(tally.runs)}</b><span>{t('cmds.rail.runs')}</span></div>
             <div className="lc-cmd-kpi lc-cmd-kpi-fail">
               <b>{fmt(tally.failed)}</b>
               <span>{t('cmds.rail.failed')}{tally.runs > 0 ? ' · ' + kit.fmtShare(tally.failed, tally.runs) : ''}</span>
             </div>
-            <div className="lc-cmd-kpi lc-cmd-kpi-time"><b>{fmtDuration(tally.ms)}</b><span>{t('cmds.rail.totalTime')}</span></div>
+            <div className="lc-cmd-kpi lc-cmd-kpi-time"><b>{totalTime}</b><span>{t('cmds.rail.totalTime')}</span></div>
             <div className="lc-cmd-kpi lc-cmd-kpi-bg"><b>{fmt(tally.bg)}</b><span>{t('cmds.rail.background')}</span></div>
           </div>
         </div>
@@ -145,59 +297,55 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
             ))}
           </div>
         ) : null}
-        <div className="lc-cmd-rail-sec lc-cmd-progs">
-          <div className="lc-cmd-rail-h lc-cmd-progs-h">
-            <span title={t('cmds.rail.topScope')}>{t('cmds.rail.top', { n: programs.length })}</span>
-            {programs.length > 6 ? (
-              <input
-                className="lc-cmd-prog-search"
-                type="search"
-                value={progQuery}
-                placeholder={t('cmds.rail.topSearch')}
-                aria-label={t('cmds.rail.topSearch')}
-                onChange={(ev: ChangeEvent<HTMLInputElement>) => { setProgQuery(ev.target.value) }}
-              />
-            ) : null}
+        {programs.length > 0 ? (
+          <div className="lc-cmd-rail-sec lc-cmd-progs">
+            <div className="lc-cmd-rail-h lc-cmd-progs-h">
+              <span title={t('cmds.rail.topScope')}>{t('cmds.rail.top', { n: programs.length })}</span>
+              {showProgSearch ? (
+                <ClearableInput
+                  className="lc-cmd-prog-search"
+                  type="search"
+                  value={progQuery}
+                  placeholder={t('cmds.rail.topSearch')}
+                  clearLabel={t('field.clear')}
+                  onChange={setProgQuery}
+                />
+              ) : null}
+            </div>
+            <div className="lc-cmd-progs-list" role="group" aria-label={t('cmds.rail.top', { n: programs.length })}>
+              {shownPrograms.map((p) => {
+                const color = nameColorOf(p.name)
+                const share = Math.round(p.n / totalPrograms * 100)
+                return (
+                  <button
+                    key={p.name}
+                    type="button"
+                    className={'lc-cmd-prog' + (programPick === p.name ? ' lc-cmd-prog-on' : '')}
+                    title={t(programPick === p.name ? 'cmds.rail.topTipOn' : 'cmds.rail.topTip', { name: p.name })}
+                    aria-pressed={programPick === p.name}
+                    onClick={() => { setProgramPick(cur => (cur === p.name ? null : p.name)) }}
+                  >
+                    <i className="lc-cmd-prog-dot" style={{ background: color }} />
+                    <span className="lc-cmd-prog-name">{p.name}</span>
+                    <span className="lc-cmd-prog-n">{'×' + fmt(p.n)}</span>
+                    <span className="lc-cmd-prog-share">{share}%</span>
+                    {/* The underline bar is relative to the heaviest program (the Skills list's idiom). */}
+                    <i className="lc-cmd-prog-bar" style={{ width: `calc(${Math.round(p.n / topProgramN * 100)}% - ${Math.round(p.n / topProgramN * 12)}px)`, background: color }} />
+                  </button>
+                )
+              })}
+              {shownPrograms.length === 0 ? <div className="lc-cmd-prog-none">{t('cmds.noMatch')}</div> : null}
+            </div>
           </div>
-          <div className="lc-cmd-progs-list" role="group" aria-label={t('cmds.rail.top', { n: programs.length })}>
-            {shownPrograms.map((p) => {
-              const color = nameColorOf(p.name)
-              const share = Math.round(p.n / totalPrograms * 100)
-              return (
-                <button
-                  key={p.name}
-                  type="button"
-                  className="lc-cmd-prog"
-                  title={t('cmds.rail.topTip', { name: p.name })}
-                  onClick={() => { setQuery(p.name) }}
-                >
-                  <i className="lc-cmd-prog-dot" style={{ background: color }} />
-                  <span className="lc-cmd-prog-name">{p.name}</span>
-                  <span className="lc-cmd-prog-n">{'×' + fmt(p.n)}</span>
-                  <span className="lc-cmd-prog-share">{share}%</span>
-                  {/* The underline bar is relative to the heaviest program (the Skills list's idiom). */}
-                  <i className="lc-cmd-prog-bar" style={{ width: `calc(${Math.round(p.n / topProgramN * 100)}% - ${Math.round(p.n / topProgramN * 12)}px)`, background: color }} />
-                </button>
-              )
-            })}
-            {shownPrograms.length === 0 ? <div className="lc-cmd-prog-none">{t('cmds.noMatch')}</div> : null}
-          </div>
-        </div>
+        ) : null}
       </div>
     ) : null
 
-    const copyCommand = (rec: Command): void => {
-      const clipboard = (globalThis.navigator as { clipboard?: { writeText?: unknown } } | undefined)?.clipboard
-      if (typeof clipboard?.writeText !== 'function') return
-      void (clipboard.writeText as (text: string) => Promise<void>).call(clipboard, rec.cmd).then(() => {
-        setCopiedSeq(rec.seq)
-        setTimeout(() => { setCopiedSeq(cur => (cur === rec.seq ? null : cur)) }, 1200)
-      }, () => {})
-    }
-
-    const detailOf = (rec: Command): ReactElement => {
-      const target = rec.parent ?? rec.resultSeq
+    const detailOf = (view: CommandView): ReactElement => {
+      const rec = view.rec
+      const target = surfaceSeqOf(rec)
       const locatable = props.onLocate !== undefined && target !== undefined
+      const stamp = target !== undefined ? props.stampOf?.(target) ?? null : null
       const facts: ReactElement[] = []
       if (rec.exit !== undefined && rec.tool !== 'run_code') {
         facts.push(
@@ -229,41 +377,73 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
       if (rec.denied === true) facts.push(<span key="deny">{t('cmds.denied')}</span>)
       if (rec.signal !== undefined) facts.push(<span key="sig">{t('cmds.signalOf', { s: rec.signal })}</span>)
       if (rec.sandbox !== undefined) facts.push(<span key="sand">{t('cmds.sandboxAsk', { s: rec.sandbox })}</span>)
-      const stamp = target !== undefined ? props.stampOf?.(target) ?? null : null
+      const result = target !== undefined ? results[target] : undefined
+      const factsEl = facts.length > 0 ? <div className="lc-cmd-detail-facts">{facts}</div> : null
+      const stampSuffix = stamp !== null ? ' · ' + t('browser.stepAt', { t: stamp.turn, s: stamp.step }) : ''
+      const resultCard = target !== undefined && props.fetchContent !== undefined ? (
+        result !== undefined && result.state === 'ready' ? (
+          <FindCard
+            label={t('block.result')}
+            text={result.text}
+            meta={<span className="lc-ts-card-meta">{t('cmds.lines', { n: result.text.split(/\r\n|\r|\n/).length })}</span>}
+            trailing={factsEl}
+          >
+            <pre className="lc-cmd-full">{result.text}</pre>
+          </FindCard>
+        ) : (
+          <Section label={t('block.result')}>
+            {result === undefined || result.state === 'loading' ? (
+              <DetailNote state="loading" className="lc-cmd-result-note" />
+            ) : result.state === 'miss' ? (
+              <div className="lc-cmd-result-note">{t('browser.noContent')}</div>
+            ) : result.state === 'empty' ? (
+              <div className="lc-cmd-result-note">{t('cmds.result.empty')}</div>
+            ) : (
+              <div className="lc-cmd-result-note">{t('cmds.result.failed')}</div>
+            )}
+            {factsEl}
+          </Section>
+        )
+      ) : null
       return (
         <div className="lc-cmd-detail">
-          {rec.description !== undefined ? <div className="lc-cmd-why">{rec.description}</div> : null}
-          <pre className="lc-cmd-full">{rec.cmd}{rec.cmdTruncated === true ? ' …' : ''}</pre>
-          <div className="lc-cmd-facts">{facts}</div>
-          <div className="lc-cmd-actions">
-            {locatable ? (
-              <button type="button" className="lc-cmd-act" onClick={() => { props.onLocate?.(rec) }}>
-                {t('cmds.reveal')}{stamp !== null ? ` · ${t('browser.stepAt', { t: stamp.turn, s: stamp.step })}` : ''}
-              </button>
-            ) : null}
-            <button type="button" className="lc-cmd-act" onClick={() => { copyCommand(rec) }}>
-              {copiedSeq === rec.seq ? t('cmds.copied') : t('cmds.copy')}
-            </button>
-          </div>
+          <FindCard
+            label={t('cmds.kv.cmd')}
+            text={rec.cmd}
+            meta={<span className="lc-ts-card-meta">{t('cmds.lines', { n: view.shape.lines })}</span>}
+            leading={locatable ? (
+              <button
+                type="button"
+                className="lc-find-btn"
+                title={t('cmds.revealTip') + stampSuffix}
+                aria-label={t('cmds.act.reveal') + stampSuffix}
+                onClick={() => { props.onLocate?.(rec) }}
+              ><IconShare size={13} /></button>
+            ) : undefined}
+            trailing={resultCard === null ? factsEl : undefined}
+          >
+            {rec.description !== undefined ? <div className="lc-cmd-why">{rec.description}</div> : null}
+            <pre className="lc-cmd-full"><CmdText text={rec.cmd} runs={runsOf(rec.tool, rec.cmd)} />{rec.cmdTruncated === true ? ' …' : ''}</pre>
+          </FindCard>
+          {resultCard}
         </div>
       )
     }
 
-    const rowOf = (rec: Command): ReactElement => {
+    const rowOf = (view: CommandView, index: number): ReactElement => {
+      const rec = view.rec
       const open = openSeq === rec.seq
-      const shape = shapeOfCmd(rec.cmd)
       const st = statusGlyphOf(rec)
-      const preview = previewOf(rec, props.workspace)
       const d = durationOf(rec)
-      const target = rec.parent ?? rec.resultSeq
+      const target = surfaceSeqOf(rec)
       const stamp = target !== undefined ? props.stampOf?.(target) ?? null : null
       const locatable = props.onLocate !== undefined && target !== undefined
       return (
-        <div key={rec.seq} className={'lc-cmd-item' + (open ? ' lc-cmd-item-on' : '')}>
+        <div key={rec.seq} className={'lc-cmd-item' + (index % 2 === 1 ? ' lc-cmd-item-alt' : '') + (open ? ' lc-cmd-item-on' : '')}>
           <button
             type="button"
             className="lc-cmd-row hover:bg-(--dsw-alias-interactive-bg-hover)"
-            title={rec.description ?? preview}
+            title={rec.description ?? view.preview}
             onClick={() => { setOpenSeq(open ? null : rec.seq) }}
           >
             <span className={'lc-br-chev' + (open ? ' lc-br-chev-on' : '')} />
@@ -271,12 +451,12 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
             <span className="lc-cmd-cmd">
               {rec.tool !== 'bash' ? <span className="lc-cmd-tool">{rec.tool === 'run_code' ? t('cmds.tool.code') : rec.tool}</span> : null}
               {rec.codeMode === true && rec.tool === 'bash' ? <span className="lc-cmd-tool">{t('cmds.tool.nested')}</span> : null}
-              {preview}
+              <CmdText text={view.preview} runs={runsOf(rec.tool, view.preview)} />
             </span>
             <span className="lc-cmd-badges">
-              {shape.lines > 1 ? <span className="lc-cmd-badge">{t('cmds.lines', { n: shape.lines })}</span> : null}
-              {shape.heredoc ? <span className="lc-cmd-badge">{t('cmds.heredoc')}</span> : null}
-              {shape.inline ? <span className="lc-cmd-badge">{t('cmds.inline')}</span> : null}
+              {view.shape.lines > 1 ? <span className="lc-cmd-badge">{t('cmds.lines', { n: view.shape.lines })}</span> : null}
+              {view.shape.heredoc ? <span className="lc-cmd-badge">{t('cmds.heredoc')}</span> : null}
+              {view.shape.inline ? <span className="lc-cmd-badge">{t('cmds.inline')}</span> : null}
               {rec.background === true ? <span className="lc-cmd-badge lc-cmd-badge-bg">{t('cmds.bgBadge')}</span> : null}
             </span>
             {d !== undefined
@@ -305,7 +485,7 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
               )
               : <span className="lc-cmd-time">{stamp !== null ? t('browser.stepAt', { t: stamp.turn, s: stamp.step }) + ' · ' : ''}{fmtTime(rec.time)}</span>}
           </button>
-          {open ? detailOf(rec) : null}
+          {open ? detailOf(view) : null}
         </div>
       )
     }
@@ -314,17 +494,12 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
       <div className="lc-card lc-cmd-card lc-col flex-1 min-w-[min(360px,100%)]">
         <div className="lc-card-title">
           <span className="lc-card-title-text">{t('cmds.title')}</span>
-          <span className="lc-cmd-meta">
-            <span>{t('cmds.runs', { n: fmt(tally.runs) })}</span>
-            {tally.failed > 0 ? <span className="lc-cmd-meta-fail">{t('cmds.failed', { n: fmt(tally.failed) })}</span> : null}
-            {tally.ms > 0 ? <span>{fmtDuration(tally.ms)}</span> : null}
-          </span>
           <div className="lc-gran lc-cmd-chips @max-[380px]/lc-card:flex-wrap">
             {FILTERS.map(f => (
               <button
                 key={f}
                 type="button"
-                className={'lc-gran-btn' + (filter === f ? ' lc-gran-on' : '')}
+                className={'lc-gran-btn lc-cmd-chip-' + f + (filter === f ? ' lc-gran-on' : '')}
                 onClick={() => { setFilter(cur => (cur === f ? 'all' : f)) }}
               >
                 {t('cmds.filter.' + f)}
@@ -337,11 +512,12 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
           {rail}
           <div className="lc-cmd-main">
             <div className="lc-cmd-ctl">
-              <input
-                className="lc-fa-search focus:border-(--dsw-alias-label-dimmed)"
+              <ClearableInput
+                className="lc-fa-search"
                 value={query}
                 placeholder={t('cmds.search')}
-                onChange={(ev: ChangeEvent<HTMLInputElement>) => { setQuery(ev.target.value) }}
+                clearLabel={t('field.clear')}
+                onChange={setQuery}
               />
               <span className="lc-gran lc-fa-sort" role="group" title={t('cmds.sortTip')}>
                 {SORTS.map(k => (
@@ -360,15 +536,24 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
             {props.floor !== undefined && commands.length > 0 ? (
               <div className="lc-cmd-floor">{t('cmds.coverage', { n: fmt(commands.length) })}</div>
             ) : null}
-            {commands.length === 0 && props.state === 'loading' ? (
+            {loadingChannel ? (
               <DetailNote state="loading" className="lc-empty lc-lane" />
-            ) : commands.length === 0 && props.state === 'failed' && props.onRetry !== undefined ? (
+            ) : failedChannel ? (
               <DetailNote state="failed" onRetry={props.onRetry} className="lc-empty lc-lane" />
             ) : shown.length === 0 ? (
               <div className="lc-empty lc-lane">{t(commands.length === 0 ? 'cmds.empty' : 'cmds.noMatch')}</div>
             ) : (
-              <div className="lc-cmd-list">
-                {shown.map(rowOf)}
+              <div className="lc-cmd-list" ref={listRef}>
+                {/* One stable fragment: branching to a separate fragment for the pads would remount every row. */}
+                {windowed && windowFrom > 0
+                  ? <div className="lc-row-pad" style={{ height: Math.max(0, windowFrom * rowPitch - rowGap) }} aria-hidden="true" />
+                  : null}
+                {windowed
+                  ? shown.slice(windowFrom, windowTo + 1).map((view, i) => rowOf(view, windowFrom + i))
+                  : shown.map(rowOf)}
+                {windowed && windowTo < lastRow
+                  ? <div className="lc-row-pad" style={{ height: Math.max(0, (lastRow - windowTo) * rowPitch - rowGap) }} aria-hidden="true" />
+                  : null}
               </div>
             )}
           </div>

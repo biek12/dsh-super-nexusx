@@ -3,17 +3,19 @@ import { activityOf, timelineOf } from '../vendor/dsh-context/src/client/service
 import { dayKeyOf } from '../vendor/dsh-context/src/shared/days.ts';
 
 export function priceBook(data) {
-  const prices = {}, npm = {};
+  const prices = {}, canonicalOf = {};
   for (const [pid, provider] of Object.entries(data ?? {})) {
-    npm[pid] = provider.npm;
     prices[pid] = {};
     for (const [mid, model] of Object.entries(provider.models ?? {})) {
       const c = model.cost;
       if (!c || !Number.isFinite(c.input) || !Number.isFinite(c.output)) continue;
       prices[pid][mid] = { miss: c.input, hit: c.cache_read ?? c.input, write: c.cache_write ?? c.input, out: c.output };
+      if (typeof model.canonical_model_id === 'string' && model.canonical_model_id.length > 0) {
+        (canonicalOf[pid] ??= {})[mid] = model.canonical_model_id;
+      }
     }
   }
-  return { prices, index: priceIndexOf(prices, npm) };
+  return { prices, index: priceIndexOf(prices, canonicalOf) };
 }
 export function summarizeContext(snapshot, book, now = new Date()) {
   const rows = Object.values(snapshot?.byId ?? {}).filter(row => row && !row.blank);

@@ -14,14 +14,14 @@
 
 [`dsh-context`](https://www.npmjs.com/package/dsh-context) provides full context lifecycle management features.
 - **Context Insights page** — the cross-session overview as a first-level sidebar panel (beside Plugins and Automation tasks): KPI band with a 7-day token/cost usage chart, activity heatmap, aggregate composition ring, and filterable session cards that jump straight into any session.
-- **Context tab** — an UI context dashboard for DeepSeek Harness's context stats, composition, trend, events, and messages.
+- **Context tab** — a UI context dashboard for DeepSeek Harness's context stats, composition, trend, events, messages, and commands.
 - **Fleet tab** — the agent family's own page: the current agent, its parents, and every subagent as one live card each.
 - **Context panel** — the same dashboard as a right-sidebar tab: pick **Context** on the sidebar's guide page and the panel opens beside the chat, agent network included.
 - **`/context` command** — the slash command shows the context model for current context composition and recent context evolution.
 
 ## Install / Update
 
-### Install on DeekSeek Harness web or desktop
+### Install on DeepSeek Harness web or desktop
 
 Fill `dsh-context` in the **Add plugin** wizard's search box, and click **Install**:
 
@@ -50,10 +50,10 @@ Five surfaces, one story — what your agent is carrying, how it got there, and 
 | Where | What you get |
 | --- | --- |
 | **Context Insights page** | Every session at a glance: usage, cost, cache hit, daily activity, and per-session context profiles — filtered by range, day, group, or search, one click to jump in. |
-| **Context tab** | The full dashboard: stats, composition, per-request trend, events, and file activity — in every session. |
+| **Context tab** | The full dashboard: stats, composition, per-request trend, events, file activity, and command executions — in every session. |
 | **Fleet tab** | The agent network: the current agent, its parents, and every subagent, live. |
 | **`/context` command** | A centered modal with the same composition and context browser, without leaving the chat. |
-| **Preferences card** | Per-user defaults: view placement, trend granularity & mode, File Activity sort, and the system prompt prefix/suffix joined around every session. |
+| **Preferences card** | Per-user defaults: the panel entry, Insights range, trend and sort defaults, and the system prompt prefix/suffix joined around every session. |
 
 ## 🗂️ The Context Insights page
 
@@ -63,7 +63,7 @@ Click **Context Insights / 上下文洞察** in the sidebar's panel list — the
 
 | Section | The question it answers |
 | --- | --- |
-| **KPI band** | How much am I using — sessions, billed tokens, estimated cost, cache-hit rate, turns, tool runs, and active time over the picked range (7d / 30d / all), each figure folded by the day its step started. |
+| **KPI band** | How much am I using — sessions active in the picked range (7d / 30d / all), with billed tokens, estimated cost, cache-hit rate and turns folded by the day each step started; tool runs and active time cover those sessions and their subagents' whole lifetime, matching the timing card. |
 | **7-day usage chart** | When did I spend what — each of the last 7 days' billed tokens and estimated cost as a bar pair, folded per turn off the sessions' own request times (not the session's last-active day). |
 | **Activity heatmap** | When do I actually work — the last 8 weeks of daily billed tokens; click a day to filter the sessions that were active on it. |
 | **Settings entry** | One row under the heatmap — the same guarded jump to this plugin's preferences as the Context tab's Plugin Info card. |
@@ -87,6 +87,9 @@ Open any session and click the **Context / 上下文** tab:
 | **Context Browser** | What any request was *actually* assembled from. |
 | **Context Events** | When and why the window changed. |
 | **File Activity** | What the agent *did* to your files. |
+| **Command Executions** | What the agent ran, how each run ended, and which programs it leaned on. |
+
+The cost estimate follows one documented rule set: [How model pricing is mapped](docs/model-pricing-mapping.md).
 
 The headline occupancy and composition read the **same official token-meter projections as the chat composer's context ring** (`contextPressure` / `contextBreakdown`), so the figures always match what the ring tells you — the card's percentage is that same occupancy, printed with one decimal.
 
@@ -166,15 +169,33 @@ One row per touched file — read, written, or searched — aggregated up to whi
 - **Click a row** to expand its full operation log — every op jumps straight to the exact tool result in the Context browser.
 - **Click a file name** to open its preview in the right Sidebar, exactly as the built-in Files sidebar does — the same viewer, the same tab-per-file behavior. On a harness without that column the name opens on your system as before.
 
+### 🖥️ Command Executions — what the agent ran
+
+![Command Executions](https://raw.githubusercontent.com/bowenliang123/dsh-context/main/docs/command-executions.png)
+
+Every shell and code run with its status, wall time, and step stamp, plus a session summary, attention shortcuts, and a program ranking. The ranking stays global while the search and status chips narrow the list; clicking a program drills into it and marks the row — the ranking never collapses under its own filter.
+
 ## 🚢 The Fleet tab
 
 Open any session and click the **Fleet / 编队** tab (right of **Context**) — the agent family on a page of its own, with room for the collaboration surfaces that follow:
 
-![Agent Network with seven subagents](https://raw.githubusercontent.com/bowenliang123/dsh-context/main/docs/agent-network.png)
+![The Fleet page for an eleven-agent team: summary, Agent Network, Fleet Members, and Tasks](https://raw.githubusercontent.com/bowenliang123/dsh-context/main/docs/fleet-overview.png)
+
+A one-line summary opens the page — agents and their status, live context, estimated cost, and task progress — then hands the same family to four linked surfaces: **Agent Network**, **Fleet Members**, **Tasks**, and **Agent Comms**. Picking an agent on the graph or the member board narrows the tasks and channels to that agent, so the page answers for one member at a time.
 
 ### 🕸 Agent Network — the family portrait
 
 The current agent, its parents, and every subagent — one card per agent: its title, live context size and window occupancy, a composition bar, and how long it has run for and how many steps it has taken. Edges fan out from each parent in the lineage's color — hover a card to light its whole chain and read the full breakdown in the detail strip; click to jump into that session's own Context tab. Running agents breathe with a green pulse on their incoming edge and turn over the harness's own rolling spinner beside their title, which settles into the same green dot the header's subagent list uses once the work is done; narrow panes fold the family into tidy rows — never a horizontal scrollbar.
+
+### 👥 Fleet Members & Tasks — who is doing what
+
+Each roster member's card carries its role (lead or teammate), model, latest reply, run time and steps, and active task count; the family's other agents sit below in the same card shape. A card's buttons open that agent's chat in the sidebar or the whole view, search and the status chips narrow both sections, and the sort menu orders the other agents by spawn order, tokens, duration, steps, or recency. The **Tasks** board puts team tasks and subagent delegations in the same place — owner groups, status filters, and blocked-by links that light the whole prerequisite chain when you focus a task. Click a task to open its full description in place, raw or rendered, and the board scrolls it to the front under a sticky owner header.
+
+### 📡 Agent Comms — who said what to whom
+
+The comms card reads the family's session logs automatically — no scan step. Team relays, mailbox deliveries, and the runtime's settlement notices merge into channels: each card pairs the lead or current agent with one counterpart, labels both sides, and shows how many messages each side sent. The timeline names both parties and their roles. Clicking any message opens the full record inline below it — the session log it came from and its sequence, a notice when the runtime wrote the settlement rather than the child, the complete closing report (with its structured result or diagnostic), and participant cards that open that agent's chat in the sidebar or the whole view. Filter by message kind or text, flip the order, and the shared agent pick from the graph or member board narrows the whole hub; older history and clipped excerpts are disclosed instead of silently truncated.
+
+![Agent Comms with a settlement record expanded inline](https://raw.githubusercontent.com/bowenliang123/dsh-context/main/docs/fleet-comms.png)
 
 The right Sidebar's **Context** panel keeps the same card inline, so the family stays one click away while you read the chat. Don't want the tab at all? Turn **Fleet tab** off in the preferences card — the card then lives on in that panel, and the Context tab's family cell opens it there whenever a Sidebar is served.
 
@@ -190,7 +211,7 @@ A centered dialog opens with the **Current Composition** card and the **Context 
 
 ## ⚙️ Settings
 
-The **Context** preferences card holds this plugin's per-user settings — default placement (the **Context** and **Fleet** conversation tabs, the right Sidebar panel, or both), the **Fleet** tab's own Show/Hide switch, the **Context Insights** default range (Today / Last 7 days / Last 30 days / All, Last 30 days unless changed; picking a preset on the page writes it back), trend granularity (Step/Turn), trend mode (Total/Delta), the trend duration curve (shown by default), tool and File Activity sort, and the sidebar insights entry. It lives on the **Plugins** page: the sidebar **Plugins** entry → the **dsh-context** bundle's page → its **Configuration** section (the card is served by the entry's live Config form).
+The **Context** preferences card holds this plugin's per-user settings — the **Context panel entry** (the **Context** conversation tab, the right Sidebar panel, both, or Hide for neither — the reply-row jump goes with it), the **Fleet** tab's own Show/Hide switch (the panel entry never gates it), the **Context Insights** default range (Today / Last 7 days / Last 30 days / All, Last 30 days unless changed; picking a preset on the page writes it back), trend granularity (Step/Turn), trend mode (Total/Delta), the trend duration curve (shown by default), the trend auto-overview step threshold, the Context Browser diff baseline, tool and File Activity sort, and the Context Insights Show/Hide switch. It lives on the **Plugins** page: the sidebar **Plugins** entry → the **dsh-context** bundle's page → its **Configuration** section (the card is served by the entry's live Config form).
 
 The **System Prompt · Prefix / Suffix** rows hold free text joined at the very start / end of every session's system prompt, for all agents (subagents included) — a per-deployment persona or behavioral rule that rides the harness's own prompt assembly. Edits apply from the next turn; leave a row empty to disable it.
 
@@ -201,7 +222,7 @@ The Context Insights preset buttons write the pick back as the stored default; e
 ## Good to know
 
 - **Estimates vs actuals** — category figures use dsh's own fixed-density heuristic (the same one as its built-in token meter); the pinned trend details show provider-reported actuals next to them, and the Token card pairs its ≈-estimated composition shares with the provider-exact billed total.
-- **Compatibility** — works on `@deepseek-ai/dsh` **0.1.7-rc.2+** (the `0.1.7` line from rc.2 and the `0.2.0` line from rc.2), the V4 session-log generation, from one shape-driven code path. The per-release matrix and how it is verified: [docs/compatibility.md](docs/compatibility.md).
+- **Compatibility** — works on `@deepseek-ai/dsh` from **0.2.0-rc.2** (the `0.2.0` and `0.2.1` lines; verified on their rc.2 releases), the V4 session-log generation, from one shape-driven code path. The per-release matrix and how it is verified: [docs/compatibility.md](docs/compatibility.md).
 - **I18n** — UI in English and 简体中文.
 
 ## Like it?
