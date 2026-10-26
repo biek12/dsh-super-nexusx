@@ -7,6 +7,7 @@ import { Settings, FooterToggle } from './settings.jsx';
 import { syncPresentation, clearPresentation } from './presentation.js';
 import { createController } from './controller.js';
 import css from './theme.css';
+import windowsCss from './windows.css';
 import statusMotionCss from './status-motion.css';
 import waitVendorCss from './wait-vendor.css';
 import waitLineCss from './wait-line.css';
@@ -58,7 +59,7 @@ export function apply(ctx) {
   const integratedContext = contextPlugin();
   ctx.inject(integratedContext.inject, scope => { scope.plugin(integratedContext); });
   ctx.effect(() => {
-    const style = document.createElement('style'); style.dataset.plugin = 'dsh-liquid-glass'; style.textContent = css + statusMotionCss + waitVendorCss + waitLineCss + surfaceMotionCss + petCss; document.head.append(style);
+    const style = document.createElement('style'); style.dataset.plugin = 'dsh-liquid-glass'; style.textContent = css + statusMotionCss + waitVendorCss + waitLineCss + surfaceMotionCss + petCss + windowsCss; document.head.append(style);
     const controller = createController();
     const context = installContext(ctx);
     const releasePet = installPet({ controller, context });

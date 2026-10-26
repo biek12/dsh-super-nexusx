@@ -1,0 +1,38 @@
+/* Windows Desktop keeps its menu and sidebar actions in a 40px title bar.
+   Scope every override to the host marker; macOS and the web keep their layout. */
+html[data-windows-titlebar] body[data-liquid-glass="on"] :is([class$="_frame"], [class*="_frame "]):has(>:is([class$="_sidebarCol"], [class*="_sidebarCol "])) {
+  padding-top: var(--dsh-windows-titlebar-height, 40px);
+}
+
+/* The native toggle and collapsed New Session button are fixed to the window.
+   Their ancestors must not clip them when the sidebar track shrinks to zero. */
+html[data-windows-titlebar] body[data-liquid-glass="on"] :is([class$="_sidebarCol"], [class*="_sidebarCol "]) {
+  overflow: visible;
+}
+html[data-windows-titlebar] body[data-liquid-glass="on"] :is([class$="_root"], [class*="_root "]):has(>:is([class$="_logoRow"], [class*="_logoRow "])) {
+  overflow: visible;
+  backdrop-filter: none;
+}
+html[data-windows-titlebar] body[data-liquid-glass="on"] :is([class$="_root"], [class*="_root "]):has(>:is([class$="_logoRow"], [class*="_logoRow "]))>:is([class$="_logoRow"], [class*="_logoRow "]) {
+  height: 40px;
+  margin: 0 0 6px;
+  padding: 0 5px;
+  overflow: visible;
+}
+html[data-windows-titlebar] body[data-liquid-glass="on"] :is([class$="_root"], [class*="_root "])[class*="_collapsed"]:has(>:is([class$="_logoRow"], [class*="_logoRow "])) {
+  padding: 0;
+}
+html[data-windows-titlebar] body[data-liquid-glass="on"] :is([class$="_root"], [class*="_root "])[class*="_collapsed"]>:is([class$="_logoRow"], [class*="_logoRow "]) {
+  height: 0;
+  margin: 0;
+  padding: 0;
+}
+
+/* Retain native handlers, shortcuts, menu offsets and Windows caption buttons. */
+html[data-windows-titlebar] body[data-liquid-glass="on"] :is([class$="_root"], [class*="_root "]):has(>:is([class$="_logoRow"], [class*="_logoRow "])) :is([class$="_toggle"], [class*="_toggle "]) {
+  position: fixed;
+  top: calc((var(--dsh-windows-titlebar-height, 40px) - 28px) / 2);
+  left: 12px;
+  z-index: 30;
+  -webkit-app-region: no-drag;
+}

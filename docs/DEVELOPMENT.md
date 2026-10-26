@@ -38,7 +38,7 @@ npm run test:release                  # 解包检查实际 CPU、权限、清单
 
 规范命名为 `dsh-super-nexusx-<版本>-darwin-<arm64|x64>.tgz`。每次打包在隔离临时目录重新编译对应 CPU 的原生伴随程序，不使用上次构建遗留的可执行文件。随后写入平台约束、`BUILD_INFO.json` 及原生程序哈希，再将完整插件和伴随程序打成一个 tgz。发布包不携带开发期脚本或依赖，不需要在安装时联网下载或编译宠物程序。
 
-`npm pack` 自身仅是底层开发打包操作，不用于正式 Release。正式发布使用 `release:build` 的两个命名包及 SHA256SUMS。Windows / Linux 仅检查通用源码构建，本版不输出缺少原生伴随程序的完整发行包。
+`npm pack` 自身仅是底层开发打包操作。macOS 完整发行包使用 `release:build` 的两个命名包及 SHA256SUMS。Windows 使用 `npm run pack:windows` 单独构建客户端包和 `.sha256` 文件，包含窗口内宠物，不包含 macOS 原生伴随程序。安装与适配范围见 [Windows 说明](WINDOWS.md)。Linux 仅检查通用源码构建。
 
 `vendor/dsh-context/lib/` 是固定上游发布产物，参与 Host 和客户端构建，必须随源码保留；其来源和 tarball 哈希见 `UPSTREAM.json`。`src/vendor/context-client.cjs` 由构建脚本生成，不手工编辑。其余 `src/vendor/` 文件是经适配的上游实现。相关许可证见 `THIRD_PARTY_NOTICES.md`。
 

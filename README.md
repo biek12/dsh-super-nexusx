@@ -5,7 +5,7 @@
 
 为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 打造的开源工作台增强插件，把会话整理、Liquid Glass 主题、上下文洞察和陪伴宠物集中到同一套界面中。
 
-当前版本 **0.11.10**，处于早期迭代阶段。已适配的本机环境为 **DSH Desktop Beta 2.0.18-beta.1 / DSH 0.2.1-rc.2、macOS**。其他 DSH 版本和系统尚未完成实机兼容验证。
+当前版本 **0.11.10**，处于早期迭代阶段。macOS 已适配 **DSH Desktop Beta 2.0.18-beta.1 / DSH 0.2.1-rc.2**；Windows 客户端新增标题栏、侧栏折叠与重新展开适配，基于 **DSH NEXT 2.0.19-next / DSH 0.2.1-rc.2** 的原生组件验证，安装方式见 [Windows 安装说明](docs/WINDOWS.md)。其他宿主版本尚未完成兼容验证。
 
 [安装指南](docs/INSTALLATION.md) · [开发说明](docs/DEVELOPMENT.md) · [更新记录](CHANGELOG.md) · [验证记录](docs/VALIDATION.md) · [问题反馈](https://github.com/biek12/dsh-super-nexusx/issues) · [参与贡献](CONTRIBUTING.md)
 
@@ -50,8 +50,9 @@ npm run pack:plugin
 | --- | --- |
 | macOS / Apple Silicon（M 系列） | `dsh-super-nexusx-0.11.10-darwin-arm64.tgz` |
 | macOS / Intel | `dsh-super-nexusx-0.11.10-darwin-x64.tgz` |
+| Windows / 客户端通用 JS | `dsh-super-nexusx-0.11.10-win32.tgz` |
 
-两种包均包含完整插件、桌面宠物原生程序、角色素材和提示音，要求 macOS 13+。M 系列使用 arm64 包原生运行，无需 Rosetta。Windows / Linux 的全桌面伴随尚未实现，本版不提供这两个系统的完整发行包。
+两种 macOS 包均包含完整插件、桌面宠物原生程序、角色素材和提示音，要求 macOS 13+。M 系列使用 arm64 包原生运行，无需 Rosetta。Windows 包通过 `npm run pack:windows` 生成，包含客户端、窗口内宠物和提示音；全桌面透明伴随窗口仍仅支持 macOS。Linux 暂不提供发行包。
 
 源码打包需要 macOS 与 Xcode Command Line Tools。`npm run pack:plugin` 自动构建当前 CPU 的完整包；`npm run release:build` 构建两个 CPU 的包并生成校验文件。
 

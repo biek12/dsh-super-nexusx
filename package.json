@@ -32,6 +32,7 @@
     "test": "node --test tests/*.test.mjs && node scripts/test-ui.mjs",
     "test:installed": "node scripts/check-installed-runtime.mjs && node scripts/check-client-runtime.mjs",
     "pack:plugin": "node scripts/pack.mjs",
+    "pack:windows": "node scripts/pack-windows.mjs",
     "build:preview": "npm run build && node scripts/build-preview.mjs",
     "check": "npm run lint && node scripts/check-project.mjs",
     "prepack": "npm run build",
